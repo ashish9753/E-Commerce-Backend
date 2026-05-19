@@ -5,6 +5,9 @@ import Cart from "../models/cart.model.js";
 import Coupon from "../models/coupon.model.js";
 import InventoryLog from "../models/inventoryLog.model.js";
 import Notification from "../models/notification.model.js";
+import Seller from "../models/seller.model.js";
+import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
+import { pushToUser } from "../utils/sseClients.js";
 
 /**
  * Queue processor for order placement.
@@ -125,24 +128,57 @@ export const processOrderJob = async (job) => {
       so()
     );
 
-    // --- Step 6: In-app notification ---
+    // --- Step 6: In-app notification for customer ---
     const notifDoc = {
       user: userId,
-      title: "Order Placed Successfully!",
-      message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}`,
+      title: "Order Placed Successfully! 🎉",
+      message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}. We'll notify you as it moves through fulfilment.`,
       type: "ORDER",
-      link: `/orders/${order._id}`,
+      link: `/track?id=${order._id}`,
     };
     if (session) {
       await Notification.create([notifDoc], { session });
     } else {
       await Notification.create(notifDoc);
     }
+    // SSE push to customer
+    pushToUser(userId.toString(), { type: "notification", notification: notifDoc });
 
     if (session) {
       await session.commitTransaction();
       session.endSession();
     }
+
+    // --- Post-commit: notify sellers + low-stock alerts (non-blocking) ---
+    setImmediate(async () => {
+      try {
+        // Find unique sellers for this order's products
+        const productIds = orderItems.map(i => i.product);
+        const products   = await Product.find({ _id: { $in: productIds } }).select("seller title stock");
+        const sellerIds  = [...new Set(products.map(p => p.seller?.toString()).filter(Boolean))];
+
+        for (const sellerId of sellerIds) {
+          await notifySeller(sellerId, {
+            title:   "New Order Received! 📦",
+            message: `Order #${order.orderNumber} has been placed for your product(s). Please confirm and process it.`,
+            type:    "ORDER",
+            link:    "/seller",
+          });
+        }
+
+        // Low-stock alerts (threshold: 5)
+        for (const product of products) {
+          if (product.stock <= 5 && product.seller) {
+            await notifySeller(product.seller, {
+              title:   `Low Stock Alert ⚠️`,
+              message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left. Restock soon to avoid missing orders.`,
+              type:    "SYSTEM",
+              link:    "/seller",
+            });
+          }
+        }
+      } catch { /* non-critical */ }
+    });
 
     return { orderId: order._id.toString(), orderNumber: order.orderNumber };
   } catch (err) {

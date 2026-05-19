@@ -16,6 +16,7 @@ import inventoryRoutes from "./inventory.routes.js";
 import chatRoutes from "./chat.routes.js";
 import bannerRoutes from "./banner.routes.js";
 import recentlyViewedRoutes from "./recentlyViewed.routes.js";
+import supportRoutes from "./support.routes.js";
 
 const router = Router();
 
@@ -35,5 +36,6 @@ router.use("/inventory", inventoryRoutes);
 router.use("/chat", chatRoutes);
 router.use("/banners", bannerRoutes);
 router.use("/recently-viewed", recentlyViewedRoutes);
+router.use("/support", supportRoutes);
 
 export default router;

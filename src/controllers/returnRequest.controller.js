@@ -4,6 +4,7 @@ import Product       from "../models/product.model.js";
 import Seller        from "../models/seller.model.js";
 import InventoryLog  from "../models/inventoryLog.model.js";
 import Notification  from "../models/notification.model.js";
+import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
@@ -28,9 +29,22 @@ export const createReturnRequest = async (req, res, next) => {
     // Find which seller owns the product — fall back to first item in order if no productId given
     let sellerId = null;
     const lookupId = productId || order.orderItems?.[0]?.product;
+    let returnableProduct = null;
     if (lookupId) {
-      const product = await Product.findById(lookupId).select("seller");
-      if (product) sellerId = product.seller;
+      returnableProduct = await Product.findById(lookupId).select("seller returnable returnWindow");
+      if (returnableProduct) sellerId = returnableProduct.seller;
+    }
+
+    // Validate return policy
+    if (returnableProduct && returnableProduct.returnable === false) {
+      throw new ApiError(400, "This product is non-returnable and cannot be returned.");
+    }
+
+    const returnWindowDays = returnableProduct?.returnWindow || 7;
+    const deliveredAt = order.deliveredAt || order.updatedAt;
+    const windowMs = returnWindowDays * 24 * 60 * 60 * 1000;
+    if (Date.now() - new Date(deliveredAt).getTime() > windowMs) {
+      throw new ApiError(400, `Return window of ${returnWindowDays} days has expired. Returns are only accepted within ${returnWindowDays} days of delivery.`);
     }
 
     // For COD orders, force refund method to bank_transfer (no original payment to return to)
@@ -52,18 +66,32 @@ export const createReturnRequest = async (req, res, next) => {
 
     await Order.findByIdAndUpdate(orderId, { orderStatus: "RETURNED" });
 
+    // Notify customer — confirmation
+    await notify({
+      userId:  req.user._id,
+      title:   "Return Request Submitted ↩️",
+      message: `Your return request for order #${order.orderNumber} has been submitted. The seller will review it within 48 hours.`,
+      type:    "REFUND",
+      link:    `/return-status/${returnReq._id}`,
+    });
+
     // Notify seller — they must act first
     if (sellerId) {
-      const sellerUser = await Seller.findById(sellerId).select("user");
-      if (sellerUser?.user) {
-        await Notification.create({
-          user:    sellerUser.user,
-          title:   "New Return Request",
-          message: `A customer has requested a return for order #${order.orderNumber || orderId.toString().slice(-6).toUpperCase()}. Please review and approve or reject within 48 hours.`,
-          type:    "REFUND",
-        });
-      }
+      await notifySeller(sellerId, {
+        title:   "New Return Request ⚠️",
+        message: `Customer requested a return for order #${order.orderNumber}. Please approve or reject within 48 hours.`,
+        type:    "REFUND",
+        link:    "/seller",
+      });
     }
+
+    // Notify admins
+    await notifyAdmins({
+      title:   "New Return Request",
+      message: `A new return request has been submitted for order #${order.orderNumber}.`,
+      type:    "REFUND",
+      link:    "/admin",
+    });
 
     res.status(201).json(new ApiResponse(201, { returnRequest: returnReq }, "Return request submitted"));
   } catch (err) {
@@ -200,13 +228,14 @@ export const sellerActionOnReturn = async (req, res, next) => {
     await returnReq.save();
 
     // Notify customer
-    await Notification.create({
-      user:    returnReq.user,
-      title:   `Return ${action === "approve" ? "Approved" : "Rejected"} by Seller`,
+    await notify({
+      userId:  returnReq.user,
+      title:   action === "approve" ? "Return Approved ✅" : "Return Rejected ❌",
       message: action === "approve"
-        ? `Great news! Your return has been approved. The seller will arrange pickup shortly.${note ? " Note: " + note : ""}`
-        : `The seller has rejected your return request.${note ? " Reason: " + note : ""} You can contact admin support to appeal.`,
+        ? `Your return for order has been approved! The seller will arrange pickup shortly.${note ? " Note: " + note : ""}`
+        : `Your return request has been rejected by the seller.${note ? " Reason: " + note : ""} Contact support to appeal.`,
       type:    "REFUND",
+      link:    `/return-status/${returnReq._id}`,
     });
 
     if (action === "reject") {
@@ -237,8 +266,9 @@ export const sellerAdvanceReturn = async (req, res, next) => {
     });
     if (!returnReq) throw new ApiError(404, "Return request not found");
 
-    // Seller can only advance through the refund pipeline
+    // Seller can advance from APPROVED (admin-approved) or their own pickup pipeline
     const pipeline = {
+      APPROVED:         "PICKUP_SCHEDULED",
       PICKUP_SCHEDULED: "ITEM_RECEIVED",
       ITEM_RECEIVED:    "REFUND_INITIATED",
       REFUND_INITIATED: "REFUND_COMPLETED",
@@ -250,28 +280,48 @@ export const sellerAdvanceReturn = async (req, res, next) => {
     }
 
     returnReq.status = nextStatus;
+
+    // Restore stock when item is physically received back
+    if (nextStatus === "ITEM_RECEIVED") {
+      const populatedOrder = await Order.findById(returnReq.order);
+      if (populatedOrder) {
+        for (const item of populatedOrder.orderItems) {
+          await Product.findByIdAndUpdate(item.product, {
+            $inc: { stock: item.quantity, sold: -item.quantity },
+          });
+        }
+        await Order.findByIdAndUpdate(returnReq.order, {
+          refundStatus: "PROCESSING",
+          refundAmount: returnReq.refundAmount,
+        });
+      }
+    }
+
     if (nextStatus === "REFUND_COMPLETED") {
       returnReq.resolvedAt = new Date();
-      // Mark order refund as completed
       await Order.findByIdAndUpdate(returnReq.order, {
         refundStatus: "COMPLETED",
         refundAmount: returnReq.refundAmount,
       });
     }
+
     pushTimeline(returnReq, nextStatus, note || `Seller marked: ${nextStatus.replace(/_/g, " ")}`, "seller");
     await returnReq.save();
 
-    // Notify customer
-    const statusMessages = {
-      ITEM_RECEIVED:    "Your returned item has been received by the seller.",
-      REFUND_INITIATED: "Your refund has been initiated and is being processed.",
-      REFUND_COMPLETED: "Your refund has been completed!",
+    // Notify customer with rich status messages
+    const customerMessages = {
+      PICKUP_SCHEDULED: { title: "Pickup Scheduled 🚚",       message: "Your return pickup has been scheduled. Please keep the item ready for collection." },
+      ITEM_RECEIVED:    { title: "Item Received 📬",           message: "Your returned item has been received by the seller. Refund processing has started." },
+      REFUND_INITIATED: { title: "Refund Initiated 💸",        message: "Your refund has been initiated and is being processed. It may take 3-7 business days." },
+      REFUND_COMPLETED: { title: "Refund Completed! 🎉",       message: "Your refund has been completed! The amount will reflect in your account shortly." },
     };
-    await Notification.create({
-      user:    returnReq.user,
-      title:   `Return Update: ${nextStatus.replace(/_/g, " ")}`,
-      message: (statusMessages[nextStatus] || `Your return status is now: ${nextStatus}.`) + (note ? ` ${note}` : ""),
+    const cm = customerMessages[nextStatus];
+    await notify({
+      userId:  returnReq.user,
+      title:   cm?.title   || `Return Update: ${nextStatus.replace(/_/g, " ")}`,
+      message: (cm?.message || `Your return status is now: ${nextStatus}.`) + (note ? ` ${note}` : ""),
       type:    "REFUND",
+      link:    `/return-status/${returnReq._id}`,
     });
 
     res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return advanced to ${nextStatus}`));
@@ -356,12 +406,42 @@ export const processReturnRequest = async (req, res, next) => {
       await Order.findByIdAndUpdate(returnReq.order._id, { refundStatus: "COMPLETED" });
     }
 
-    await Notification.create({
-      user:    returnReq.user,
-      title:   `Return Request Update`,
-      message: `Your return is now: ${status.replace(/_/g, " ")}.${adminNote ? " " + adminNote : ""}`,
+    const adminStatusMessages = {
+      APPROVED:          { title: "Return Approved ✅",       message: "Your return request has been approved by admin. The seller will arrange pickup." },
+      REJECTED:          { title: "Return Rejected ❌",       message: "Your return request has been rejected by admin." },
+      PICKUP_SCHEDULED:  { title: "Pickup Scheduled 🚚",      message: "Your return pickup has been scheduled." },
+      ITEM_RECEIVED:     { title: "Item Received 📬",          message: "Your returned item has been received. Refund is being processed." },
+      REFUND_INITIATED:  { title: "Refund Initiated 💸",       message: "Your refund has been initiated. It may take 3-7 business days." },
+      REFUND_COMPLETED:  { title: "Refund Completed! 🎉",      message: "Your refund is complete! The amount will reflect shortly." },
+      REPLACEMENT_SENT:  { title: "Replacement Shipped 📦",    message: "Your replacement item has been shipped." },
+      COMPLETED:         { title: "Return Completed ✅",       message: "Your return/refund case has been fully resolved." },
+    };
+    const am = adminStatusMessages[status];
+
+    // Notify customer
+    await notify({
+      userId:  returnReq.user,
+      title:   am?.title   || "Return Update",
+      message: (am?.message || `Your return is now: ${status.replace(/_/g, " ")}.`) + (adminNote ? ` ${adminNote}` : ""),
       type:    "REFUND",
+      link:    `/return-status/${returnReq._id}`,
     });
+
+    // Notify seller on admin approval/rejection
+    if (returnReq.seller) {
+      const sellerMsg = {
+        APPROVED: "Admin has approved a return request for your product. Please arrange pickup.",
+        REJECTED: "Admin has rejected a return request for your product.",
+      }[status];
+      if (sellerMsg) {
+        await notifySeller(returnReq.seller, {
+          title:   `Return ${status} by Admin`,
+          message: sellerMsg + (adminNote ? ` Note: ${adminNote}` : ""),
+          type:    "REFUND",
+          link:    "/seller",
+        });
+      }
+    }
 
     res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return updated to ${status}`));
   } catch (err) {

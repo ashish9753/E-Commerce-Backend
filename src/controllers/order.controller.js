@@ -4,10 +4,21 @@ import Order from "../models/order.model.js";
 import Coupon from "../models/coupon.model.js";
 import Seller from "../models/seller.model.js";
 import Notification from "../models/notification.model.js";
+import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+
+const ORDER_STATUS_MESSAGES = {
+  CONFIRMED:        { title: "Order Confirmed ✅",          message: "Your order has been confirmed and is being prepared." },
+  PACKED:           { title: "Order Packed 📦",             message: "Your order has been packed and is ready for dispatch." },
+  SHIPPED:          { title: "Order Shipped 🚚",            message: "Your order is on its way!" },
+  OUT_FOR_DELIVERY: { title: "Out for Delivery 🛵",         message: "Your order is out for delivery. Expect it today!" },
+  DELIVERED:        { title: "Order Delivered 🎉",          message: "Your order has been delivered. Enjoy your purchase!" },
+  CANCELLED:        { title: "Order Cancelled ❌",          message: "Your order has been cancelled." },
+  RETURNED:         { title: "Return Initiated ↩️",         message: "Your return has been initiated." },
+};
 
 const SHIPPING_THRESHOLD = 500;
 const SHIPPING_PRICE = 50;
@@ -145,7 +156,7 @@ export const getMyOrders = async (req, res, next) => {
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
-        .populate("orderItems.product", "title images")
+        .populate("orderItems.product", "title images returnable returnWindow")
         .populate("coupon", "code")
         .skip(skip)
         .limit(limit)
@@ -203,10 +214,38 @@ export const cancelOrder = async (req, res, next) => {
     await order.save();
 
     // Restore stock
+    const sellerIds = new Set();
     for (const item of order.orderItems) {
-      await Product.findByIdAndUpdate(item.product, {
-        $inc: { stock: item.quantity, sold: -item.quantity },
-      });
+      const product = await Product.findByIdAndUpdate(
+        item.product,
+        { $inc: { stock: item.quantity, sold: -item.quantity } },
+        { new: true }
+      );
+      if (product?.seller) sellerIds.add(product.seller.toString());
+    }
+
+    // Notify customer
+    await notify({
+      userId:  order.user,
+      title:   "Order Cancelled ❌",
+      message: `Your order #${order.orderNumber} has been cancelled.${reason ? " Reason: " + reason : ""} ${order.paymentStatus === "PAID" ? "A refund will be processed shortly." : ""}`,
+      type:    "ORDER",
+      link:    `/orders`,
+    });
+
+    // Notify sellers
+    for (const sellerId of sellerIds) {
+      const seller = await Seller.findOne({ user: sellerId }).select("_id").catch(() => null)
+                  || await Seller.findById(sellerId).select("user").catch(() => null);
+      if (seller) {
+        await notify({
+          userId:  seller.user || sellerId,
+          title:   "Order Cancelled ❌",
+          message: `Order #${order.orderNumber} has been cancelled by the customer.`,
+          type:    "ORDER",
+          link:    "/seller",
+        });
+      }
     }
 
     res.json(new ApiResponse(200, { order }, "Order cancelled successfully"));
@@ -259,6 +298,36 @@ export const updateOrderStatus = async (req, res, next) => {
     }
 
     await order.save();
+
+    // Notify customer
+    const msg = ORDER_STATUS_MESSAGES[status];
+    if (msg) {
+      await notify({
+        userId:  order.user,
+        title:   msg.title,
+        message: msg.message + (note ? ` Note: ${note}` : ""),
+        type:    "ORDER",
+        link:    `/track?id=${order._id}`,
+      });
+    }
+
+    // Notify relevant sellers
+    setImmediate(async () => {
+      try {
+        const productIds = order.orderItems.map(i => i.product);
+        const products   = await Product.find({ _id: { $in: productIds } }).select("seller");
+        const sellerIds  = [...new Set(products.map(p => p.seller?.toString()).filter(Boolean))];
+        for (const sid of sellerIds) {
+          await notifySeller(sid, {
+            title:   `Order ${status.replace(/_/g, " ")}`,
+            message: `Order #${order.orderNumber} has been updated to ${status.replace(/_/g, " ")} by admin.`,
+            type:    "ORDER",
+            link:    "/seller",
+          });
+        }
+      } catch { /* non-critical */ }
+    });
+
     res.json(new ApiResponse(200, { order }, "Order status updated"));
   } catch (err) {
     next(err);
@@ -298,12 +367,14 @@ export const sellerUpdateOrderStatus = async (req, res, next) => {
 
     await order.save();
 
-    // Notify customer
-    await Notification.create({
-      user:    order.user,
-      title:   `Order ${status.replace(/_/g, " ")}`,
-      message: `Your order #${order.orderNumber} has been updated to: ${status.replace(/_/g, " ")}.${note ? " " + note : ""}`,
+    // Notify customer with rich message
+    const msg = ORDER_STATUS_MESSAGES[status];
+    await notify({
+      userId:  order.user,
+      title:   msg?.title || `Order ${status.replace(/_/g, " ")}`,
+      message: (msg?.message || `Your order #${order.orderNumber} is now: ${status.replace(/_/g, " ")}.`) + (note ? ` ${note}` : ""),
       type:    "ORDER",
+      link:    `/track?id=${order._id}`,
     });
 
     res.json(new ApiResponse(200, { order }, "Order status updated"));

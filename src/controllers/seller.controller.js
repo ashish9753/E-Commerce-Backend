@@ -4,6 +4,7 @@ import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { notify, notifyAdmins } from "../utils/notify.js";
 
 export const registerSeller = async (req, res, next) => {
   try {
@@ -24,6 +25,22 @@ export const registerSeller = async (req, res, next) => {
     });
 
     await User.findByIdAndUpdate(req.user._id, { role: "seller" });
+
+    // Notify the new seller
+    await notify({
+      userId:  req.user._id,
+      title:   "Seller Registration Submitted 🏪",
+      message: `Your seller account for "${shopName}" has been submitted and is pending admin verification. You'll be notified once approved.`,
+      type:    "SYSTEM",
+    });
+
+    // Notify admins
+    await notifyAdmins({
+      title:   "New Seller Registration 🏪",
+      message: `${req.user.name || "A user"} registered as a seller with shop "${shopName}". Please review and verify.`,
+      type:    "SYSTEM",
+      link:    "/admin",
+    });
 
     res.status(201).json(new ApiResponse(201, { seller }, "Seller registered. Pending verification."));
   } catch (err) {
@@ -97,6 +114,16 @@ export const verifySeller = async (req, res, next) => {
       { new: true }
     );
     if (!seller) throw new ApiError(404, "Seller not found");
+
+    // Notify the seller that their account is approved
+    await notify({
+      userId:  seller.user,
+      title:   "Seller Account Approved! 🎉",
+      message: `Congratulations! Your seller account for "${seller.shopName}" has been verified by admin. You can now list products and start selling.`,
+      type:    "SYSTEM",
+      link:    "/seller",
+    });
+
     res.json(new ApiResponse(200, { seller }, "Seller verified"));
   } catch (err) {
     next(err);

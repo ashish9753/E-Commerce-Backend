@@ -10,7 +10,8 @@ const notificationSchema = new mongoose.Schema(
       enum: ["ORDER", "PAYMENT", "OFFER", "REFUND", "SYSTEM"],
       required: true,
     },
-    link: String,
+    link:       String,
+    couponCode: String,
     isRead: { type: Boolean, default: false },
   },
   { timestamps: true }

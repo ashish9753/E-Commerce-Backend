@@ -12,7 +12,7 @@ export const createProduct = async (req, res, next) => {
     const seller = await Seller.findOne({ user: req.user._id, isVerified: true });
     if (!seller) throw new ApiError(403, "Only verified sellers can create products");
 
-    const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured } = req.body;
+    const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured, returnable, returnWindow } = req.body;
     if (!title || !description || !category || !price) {
       throw new ApiError(400, "title, description, category, and price are required");
     }
@@ -35,7 +35,9 @@ export const createProduct = async (req, res, next) => {
       stock: parseInt(stock) || 0,
       tags: tags ? (Array.isArray(tags) ? tags : tags.split(",").map((t) => t.trim())) : [],
       specifications: specifications ? (typeof specifications === "string" ? JSON.parse(specifications) : specifications) : {},
-      isFeatured: isFeatured === "true" || isFeatured === true,
+      isFeatured:   isFeatured === "true" || isFeatured === true,
+      returnable:   returnable === false || returnable === "false" ? false : true,
+      returnWindow: [7, 10].includes(parseInt(returnWindow)) ? parseInt(returnWindow) : 7,
       images,
     });
 
@@ -143,6 +145,8 @@ export const updateProduct = async (req, res, next) => {
     if (updates.price) updates.price = parseFloat(updates.price);
     if (updates.discountPrice) updates.discountPrice = parseFloat(updates.discountPrice);
     if (updates.stock !== undefined) updates.stock = parseInt(updates.stock);
+    if (updates.returnable !== undefined) updates.returnable = updates.returnable === false || updates.returnable === "false" ? false : true;
+    if (updates.returnWindow !== undefined) updates.returnWindow = [7, 10].includes(parseInt(updates.returnWindow)) ? parseInt(updates.returnWindow) : 7;
     if (req.files?.length) {
       const uploads = await Promise.all(req.files.map((f) => uploadToCloudinary(f.buffer, "ecommerce/products")));
       updates.images = [...product.images, ...uploads.map((r) => r.secure_url)];

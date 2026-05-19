@@ -19,9 +19,11 @@ const productSchema = new mongoose.Schema(
     totalReviews: { type: Number, default: 0 },
     tags: [String],
     specifications: { type: Map, of: String },
-    isFeatured: { type: Boolean, default: false },
-    isPublished: { type: Boolean, default: true },
-    isDeleted: { type: Boolean, default: false },
+    isFeatured:    { type: Boolean, default: false },
+    isPublished:   { type: Boolean, default: true },
+    isDeleted:     { type: Boolean, default: false },
+    returnable:    { type: Boolean, default: true },
+    returnWindow:  { type: Number, enum: [7, 10], default: 7 },
   },
   { timestamps: true }
 );
