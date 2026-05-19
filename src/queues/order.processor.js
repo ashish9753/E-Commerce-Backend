@@ -5,8 +5,8 @@ import Cart from "../models/cart.model.js";
 import Coupon from "../models/coupon.model.js";
 import InventoryLog from "../models/inventoryLog.model.js";
 import Notification from "../models/notification.model.js";
-import Seller from "../models/seller.model.js";
-import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
+import Employee from "../models/seller.model.js";
+import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { pushToUser } from "../utils/sseClients.js";
 
 /**
@@ -36,6 +36,9 @@ export const processOrderJob = async (job) => {
     totalPrice,
     couponId,
     estimatedDeliveryDate,
+    codBookingAmount = 0,
+    codBookingUtr = "",
+    codBookingStatus = "NOT_REQUIRED",
   } = job.data;
 
   // Standalone MongoDB (no replica set) cannot use transactions.
@@ -90,6 +93,9 @@ export const processOrderJob = async (job) => {
         ? new Date(estimatedDeliveryDate)
         : new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
       statusHistory: [{ status: "PLACED", timestamp: new Date() }],
+      codBookingAmount,
+      codBookingUtr,
+      codBookingStatus,
     };
 
     let order;
@@ -149,31 +155,31 @@ export const processOrderJob = async (job) => {
       session.endSession();
     }
 
-    // --- Post-commit: notify sellers + low-stock alerts (non-blocking) ---
+    // --- Post-commit: notify employees + low-stock alerts (non-blocking) ---
     setImmediate(async () => {
       try {
-        // Find unique sellers for this order's products
+        // Find unique employees for this order's products
         const productIds = orderItems.map(i => i.product);
-        const products   = await Product.find({ _id: { $in: productIds } }).select("seller title stock");
-        const sellerIds  = [...new Set(products.map(p => p.seller?.toString()).filter(Boolean))];
+        const products   = await Product.find({ _id: { $in: productIds } }).select("employee title stock");
+        const employeeIds  = [...new Set(products.map(p => p.employee?.toString()).filter(Boolean))];
 
-        for (const sellerId of sellerIds) {
-          await notifySeller(sellerId, {
+        for (const employeeId of employeeIds) {
+          await notifyEmployee(employeeId, {
             title:   "New Order Received! 📦",
             message: `Order #${order.orderNumber} has been placed for your product(s). Please confirm and process it.`,
             type:    "ORDER",
-            link:    "/seller",
+            link:    "/employee",
           });
         }
 
         // Low-stock alerts (threshold: 5)
         for (const product of products) {
-          if (product.stock <= 5 && product.seller) {
-            await notifySeller(product.seller, {
+          if (product.stock <= 5 && product.employee) {
+            await notifyEmployee(product.employee, {
               title:   `Low Stock Alert ⚠️`,
               message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left. Restock soon to avoid missing orders.`,
               type:    "SYSTEM",
-              link:    "/seller",
+              link:    "/employee",
             });
           }
         }

@@ -1,5 +1,5 @@
 import Product from "../models/product.model.js";
-import Seller from "../models/seller.model.js";
+import Employee from "../models/seller.model.js";
 import RecentlyViewed from "../models/recentlyViewed.model.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { generateUniqueSlug } from "../utils/slugify.utils.js";
@@ -9,8 +9,8 @@ import ApiResponse from "../utils/ApiResponse.js";
 
 export const createProduct = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id, isVerified: true });
-    if (!seller) throw new ApiError(403, "Only verified sellers can create products");
+    const employee = await Employee.findOne({ user: req.user._id, isVerified: true });
+    if (!employee) throw new ApiError(403, "Only verified employees can create products");
 
     const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured, returnable, returnWindow } = req.body;
     if (!title || !description || !category || !price) {
@@ -28,7 +28,7 @@ export const createProduct = async (req, res, next) => {
     }
 
     const product = await Product.create({
-      seller: seller._id,
+      employee: employee._id,
       title, slug, description, shortDescription, category, brand, sku,
       price: parseFloat(price),
       discountPrice: discountPrice ? parseFloat(discountPrice) : undefined,
@@ -76,7 +76,7 @@ export const getProducts = async (req, res, next) => {
     const [products, total] = await Promise.all([
       Product.find(filter)
         .populate("category", "name slug")
-        .populate("seller", "shopName")
+        .populate("employee", "shopName")
         .select("-specifications")
         .skip(skip)
         .limit(limit)
@@ -94,7 +94,7 @@ export const getProductBySlug = async (req, res, next) => {
   try {
     const product = await Product.findOne({ slug: req.params.slug, isDeleted: false })
       .populate("category", "name slug")
-      .populate("seller", "shopName shopLogo rating");
+      .populate("employee", "shopName shopLogo rating");
 
     if (!product) throw new ApiError(404, "Product not found");
 
@@ -124,7 +124,7 @@ export const getProductById = async (req, res, next) => {
   try {
     const product = await Product.findOne({ _id: req.params.productId, isDeleted: false })
       .populate("category", "name slug")
-      .populate("seller", "shopName shopLogo rating");
+      .populate("employee", "shopName shopLogo rating");
     if (!product) throw new ApiError(404, "Product not found");
     res.json(new ApiResponse(200, { product }));
   } catch (err) {
@@ -134,10 +134,10 @@ export const getProductById = async (req, res, next) => {
 
 export const updateProduct = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(403, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(403, "Employee profile not found");
 
-    const product = await Product.findOne({ _id: req.params.productId, seller: seller._id, isDeleted: false });
+    const product = await Product.findOne({ _id: req.params.productId, employee: employee._id, isDeleted: false });
     if (!product) throw new ApiError(404, "Product not found or you don't own it");
 
     const updates = { ...req.body };
@@ -161,11 +161,11 @@ export const updateProduct = async (req, res, next) => {
 
 export const deleteProduct = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id });
+    const employee = await Employee.findOne({ user: req.user._id });
     const isAdmin = req.user.role === "admin";
 
     const filter = { _id: req.params.productId };
-    if (!isAdmin) filter.seller = seller?._id;
+    if (!isAdmin) filter.employee = employee?._id;
 
     const product = await Product.findOneAndUpdate(filter, { isDeleted: true }, { new: true });
     if (!product) throw new ApiError(404, "Product not found or access denied");
@@ -178,11 +178,11 @@ export const deleteProduct = async (req, res, next) => {
 
 export const getMyProducts = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(404, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(404, "Employee profile not found");
 
     const { page, limit, skip } = getPaginationData(req.query);
-    const filter = { seller: seller._id, isDeleted: false };
+    const filter = { employee: employee._id, isDeleted: false };
 
     const [products, total] = await Promise.all([
       Product.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }),

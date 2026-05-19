@@ -17,4 +17,4 @@ const sellerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("Seller", sellerSchema);
+export default mongoose.model("Employee", sellerSchema);

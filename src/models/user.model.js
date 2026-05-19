@@ -19,7 +19,7 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, required: true },
     password: { type: String, required: true, select: false },
     profileImage: String,
-    role: { type: String, enum: ["user", "admin", "seller"], default: "user" },
+    role: { type: String, enum: ["user", "admin", "employee"], default: "user" },
     addresses: [addressSchema],
     wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     isBlocked: { type: Boolean, default: false },

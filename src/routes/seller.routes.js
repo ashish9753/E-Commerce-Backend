@@ -1,7 +1,7 @@
 import { Router } from "express";
 import {
-  registerSeller, getMySellerProfile, updateSellerProfile, uploadShopLogo,
-  getAllSellers, verifySeller, getSellerById,
+  registerEmployee, getMyEmployeeProfile, updateEmployeeProfile, uploadShopLogo,
+  getAllEmployees, verifyEmployee, getEmployeeById,
 } from "../controllers/seller.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
@@ -11,13 +11,13 @@ const router = Router();
 
 router.use(protect);
 
-router.post("/register", registerSeller);
-router.get("/me", authorize("seller", "admin"), getMySellerProfile);
-router.patch("/me", authorize("seller", "admin"), updateSellerProfile);
-router.patch("/me/logo", authorize("seller", "admin"), uploadSingle("shopLogo"), uploadShopLogo);
+router.post("/register", registerEmployee);
+router.get("/me", authorize("employee", "admin"), getMyEmployeeProfile);
+router.patch("/me", authorize("employee", "admin"), updateEmployeeProfile);
+router.patch("/me/logo", authorize("employee", "admin"), uploadSingle("shopLogo"), uploadShopLogo);
 
-router.get("/", authorize("admin"), getAllSellers);
-router.get("/:sellerId", getSellerById);
-router.patch("/:sellerId/verify", authorize("admin"), verifySeller);
+router.get("/", authorize("admin"), getAllEmployees);
+router.get("/:employeeId", getEmployeeById);
+router.patch("/:employeeId/verify", authorize("admin"), verifyEmployee);
 
 export default router;

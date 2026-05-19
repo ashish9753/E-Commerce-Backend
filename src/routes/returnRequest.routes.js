@@ -4,9 +4,9 @@ import {
   getReturnById,
   updateRefundMethod,
   getMyReturnRequests,
-  getSellerReturnRequests,
-  sellerActionOnReturn,
-  sellerAdvanceReturn,
+  getEmployeeReturnRequests,
+  employeeActionOnReturn,
+  employeeAdvanceReturn,
   getAllReturnRequests,
   processReturnRequest,
 } from "../controllers/returnRequest.controller.js";
@@ -23,18 +23,18 @@ router.use(protect);
 // Admin
 router.get("/",                     authorize("admin"), getAllReturnRequests);
 
-// Seller
-router.get("/seller",               authorize("seller", "admin"), getSellerReturnRequests);
+// Employee
+router.get("/employee",               authorize("employee", "admin"), getEmployeeReturnRequests);
 
 // Customer
 router.post("/",                    uploadMultiple("images", 3), createReturnRequest);
 router.get("/my",                   getMyReturnRequests);
 
 // Parameterised routes last
-router.get("/:requestId",                  getReturnById);
-router.patch("/:requestId/refund-method",  updateRefundMethod);
-router.patch("/:requestId/seller-action",  authorize("seller"), sellerActionOnReturn);
-router.patch("/:requestId/seller-advance", authorize("seller"), sellerAdvanceReturn);
-router.patch("/:requestId/process",        authorize("admin"),  processReturnRequest);
+router.get("/:requestId",                   getReturnById);
+router.patch("/:requestId/refund-method",   updateRefundMethod);
+router.patch("/:requestId/employee-action", authorize("employee"), employeeActionOnReturn);
+router.patch("/:requestId/employee-advance",authorize("employee"), employeeAdvanceReturn);
+router.patch("/:requestId/process",         authorize("admin"),    processReturnRequest);
 
 export default router;

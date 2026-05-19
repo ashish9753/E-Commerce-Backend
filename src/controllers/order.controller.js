@@ -2,9 +2,9 @@ import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import Coupon from "../models/coupon.model.js";
-import Seller from "../models/seller.model.js";
+import Employee from "../models/seller.model.js";
 import Notification from "../models/notification.model.js";
-import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
+import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
@@ -31,7 +31,7 @@ const TAX_RATE = 0.18;
  */
 export const placeOrder = async (req, res, next) => {
   try {
-    const { shippingAddressId, paymentMethod, useCart = true, directItem } = req.body;
+    const { shippingAddressId, paymentMethod, useCart = true, directItem, codBookingUtr } = req.body;
 
     if (!shippingAddressId || !paymentMethod) {
       throw new ApiError(400, "shippingAddressId and paymentMethod are required");
@@ -106,6 +106,21 @@ export const placeOrder = async (req, res, next) => {
 
     const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
 
+    // COD booking amount
+    let codBookingAmount = 0;
+    let codBookingStatus = "NOT_REQUIRED";
+    if (paymentMethod === "COD") {
+      const Settings = (await import("../models/settings.model.js")).default;
+      const settingsDoc = await Settings.findOne({ key: "codBooking" });
+      const cfg = settingsDoc?.value;
+      if (cfg?.enabled && totalPrice >= (cfg.minOrderAmount || 0)) {
+        codBookingAmount = cfg.bookingType === "percent"
+          ? parseFloat(((totalPrice * cfg.bookingValue) / 100).toFixed(2))
+          : cfg.bookingValue;
+        codBookingStatus = codBookingUtr ? "PAID" : "PENDING";
+      }
+    }
+
     const jobData = {
       userId: user._id.toString(),
       orderItems,
@@ -117,6 +132,9 @@ export const placeOrder = async (req, res, next) => {
       discountAmount,
       totalPrice,
       couponId: couponId?.toString() || null,
+      codBookingAmount,
+      codBookingUtr: codBookingUtr || "",
+      codBookingStatus,
     };
 
     let result;
@@ -214,14 +232,14 @@ export const cancelOrder = async (req, res, next) => {
     await order.save();
 
     // Restore stock
-    const sellerIds = new Set();
+    const employeeIds = new Set();
     for (const item of order.orderItems) {
       const product = await Product.findByIdAndUpdate(
         item.product,
         { $inc: { stock: item.quantity, sold: -item.quantity } },
         { new: true }
       );
-      if (product?.seller) sellerIds.add(product.seller.toString());
+      if (product?.employee) employeeIds.add(product.employee.toString());
     }
 
     // Notify customer
@@ -233,17 +251,17 @@ export const cancelOrder = async (req, res, next) => {
       link:    `/orders`,
     });
 
-    // Notify sellers
-    for (const sellerId of sellerIds) {
-      const seller = await Seller.findOne({ user: sellerId }).select("_id").catch(() => null)
-                  || await Seller.findById(sellerId).select("user").catch(() => null);
-      if (seller) {
+    // Notify employees
+    for (const employeeId of employeeIds) {
+      const employee = await Employee.findOne({ user: employeeId }).select("_id").catch(() => null)
+                  || await Employee.findById(employeeId).select("user").catch(() => null);
+      if (employee) {
         await notify({
-          userId:  seller.user || sellerId,
+          userId:  employee.user || employeeId,
           title:   "Order Cancelled ❌",
           message: `Order #${order.orderNumber} has been cancelled by the customer.`,
           type:    "ORDER",
-          link:    "/seller",
+          link:    "/employee",
         });
       }
     }
@@ -311,18 +329,18 @@ export const updateOrderStatus = async (req, res, next) => {
       });
     }
 
-    // Notify relevant sellers
+    // Notify relevant employees
     setImmediate(async () => {
       try {
         const productIds = order.orderItems.map(i => i.product);
-        const products   = await Product.find({ _id: { $in: productIds } }).select("seller");
-        const sellerIds  = [...new Set(products.map(p => p.seller?.toString()).filter(Boolean))];
-        for (const sid of sellerIds) {
-          await notifySeller(sid, {
+        const products   = await Product.find({ _id: { $in: productIds } }).select("employee");
+        const employeeIds  = [...new Set(products.map(p => p.employee?.toString()).filter(Boolean))];
+        for (const eid of employeeIds) {
+          await notifyEmployee(eid, {
             title:   `Order ${status.replace(/_/g, " ")}`,
             message: `Order #${order.orderNumber} has been updated to ${status.replace(/_/g, " ")} by admin.`,
             type:    "ORDER",
-            link:    "/seller",
+            link:    "/employee",
           });
         }
       } catch { /* non-critical */ }
@@ -334,30 +352,30 @@ export const updateOrderStatus = async (req, res, next) => {
   }
 };
 
-/* Seller: update order status (restricted — cannot cancel or set PLACED/RETURNED) */
-export const sellerUpdateOrderStatus = async (req, res, next) => {
+/* Employee: update order status (restricted — cannot cancel or set PLACED/RETURNED) */
+export const employeeUpdateOrderStatus = async (req, res, next) => {
   try {
     const { status, trackingId, note } = req.body;
 
-    // Sellers can only move orders forward through fulfilment pipeline
-    const sellerAllowedStatuses = ["CONFIRMED", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED"];
-    if (!sellerAllowedStatuses.includes(status)) {
-      throw new ApiError(400, `Sellers can only set status to: ${sellerAllowedStatuses.join(", ")}`);
+    // Employees can only move orders forward through fulfilment pipeline
+    const employeeAllowedStatuses = ["CONFIRMED", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED"];
+    if (!employeeAllowedStatuses.includes(status)) {
+      throw new ApiError(400, `Employees can only set status to: ${employeeAllowedStatuses.join(", ")}`);
     }
 
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(403, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(403, "Employee profile not found");
 
     const order = await Order.findById(req.params.orderId);
     if (!order) throw new ApiError(404, "Order not found");
 
-    // Ensure this order contains at least one of the seller's products
-    const sellerProductIds = (await Product.find({ seller: seller._id }).select("_id")).map(p => p._id.toString());
-    const hasSellerProduct = order.orderItems.some(item => sellerProductIds.includes(item.product?.toString()));
-    if (!hasSellerProduct) throw new ApiError(403, "This order does not contain your products");
+    // Ensure this order contains at least one of the employee's products
+    const employeeProductIds = (await Product.find({ employee: employee._id }).select("_id")).map(p => p._id.toString());
+    const hasEmployeeProduct = order.orderItems.some(item => employeeProductIds.includes(item.product?.toString()));
+    if (!hasEmployeeProduct) throw new ApiError(403, "This order does not contain your products");
 
     order.orderStatus = status;
-    order.statusHistory.push({ status, note: note || `Status updated by seller`, timestamp: new Date() });
+    order.statusHistory.push({ status, note: note || `Status updated by employee`, timestamp: new Date() });
     if (trackingId) order.trackingId = trackingId;
     if (status === "DELIVERED") {
       order.deliveredAt  = new Date();
@@ -383,12 +401,12 @@ export const sellerUpdateOrderStatus = async (req, res, next) => {
   }
 };
 
-export const getSellerOrders = async (req, res, next) => {
+export const getEmployeeOrders = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(404, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(404, "Employee profile not found");
 
-    const products = await Product.find({ seller: seller._id }).select("_id");
+    const products = await Product.find({ employee: employee._id }).select("_id");
     const productIds = products.map((p) => p._id);
 
     const { page, limit, skip } = getPaginationData(req.query);
@@ -405,12 +423,10 @@ export const getSellerOrders = async (req, res, next) => {
       Order.countDocuments(filter),
     ]);
 
-    // Revenue for this seller = sum of orderItems that belong to seller's products
+    // Revenue = full order totalPrice for all paid orders containing employee's products
     const revenueAgg = await Order.aggregate([
       { $match: { "orderItems.product": { $in: productIds }, paymentStatus: "PAID" } },
-      { $unwind: "$orderItems" },
-      { $match: { "orderItems.product": { $in: productIds } } },
-      { $group: { _id: null, total: { $sum: { $multiply: ["$orderItems.price", "$orderItems.quantity"] } } } },
+      { $group: { _id: null, total: { $sum: "$totalPrice" } } },
     ]);
 
     const statusAgg = await Order.aggregate([
@@ -420,9 +436,52 @@ export const getSellerOrders = async (req, res, next) => {
 
     res.json(new ApiResponse(200, {
       ...buildPaginatedResponse(orders, total, page, limit),
-      sellerRevenue: revenueAgg[0]?.total || 0,
+      employeeRevenue: revenueAgg[0]?.total || 0,
       statusBreakdown: statusAgg,
     }));
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* Admin: force-refund any delivered order (bypasses returnability) */
+export const adminForceRefund = async (req, res, next) => {
+  try {
+    const { reason = "Admin initiated refund", adminNote = "", refundAmount } = req.body;
+    const order = await Order.findById(req.params.orderId).populate("user", "name email");
+    if (!order) throw new ApiError(404, "Order not found");
+    if (!["DELIVERED", "CANCELLED"].includes(order.orderStatus)) {
+      throw new ApiError(400, "Force refund only allowed on delivered or cancelled orders");
+    }
+
+    const { default: ReturnRequest } = await import("../models/returnRequest.model.js");
+
+    const existing = await ReturnRequest.findOne({ order: order._id });
+    if (existing) throw new ApiError(409, "A return/refund request already exists for this order");
+
+    const ret = await ReturnRequest.create({
+      order:       order._id,
+      user:        order.user._id,
+      product:     order.orderItems[0]?.product || null,
+      reason,
+      description: adminNote || "Admin override refund",
+      resolution:  "refund",
+      refundAmount: refundAmount || order.totalPrice,
+      adminNote,
+      status:      "APPROVED",
+      timeline: [
+        { status: "REQUESTED",  note: "Admin force-initiated refund", by: "admin", at: new Date() },
+        { status: "APPROVED",   note: adminNote || "Admin approved immediately", by: "admin", at: new Date() },
+      ],
+    });
+
+    order.orderStatus = "RETURNED";
+    order.statusHistory.push({ status: "RETURNED", note: `Admin force-refund: ${adminNote || reason}`, timestamp: new Date() });
+    await order.save();
+
+    await notify({ userId: order.user._id, title: "Refund Initiated ↩️", message: `Your order ${order.orderNumber} has been approved for a refund of ₹${refundAmount || order.totalPrice}.`, type: "ORDER", link: `/track?id=${order._id}` });
+
+    res.json(new ApiResponse(200, { returnRequest: ret }, "Force refund initiated"));
   } catch (err) {
     next(err);
   }

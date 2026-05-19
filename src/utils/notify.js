@@ -32,13 +32,13 @@ export async function notifyAdmins({ title, message, type, link }) {
 }
 
 /**
- * Notify the seller user that owns a Seller document.
- * @param {ObjectId|string} sellerId — the Seller._id (not user._id)
+ * Notify the employee user that owns an Employee document.
+ * @param {ObjectId|string} employeeId — the Employee._id (not user._id)
  */
-export async function notifySeller(sellerId, { title, message, type, link }) {
+export async function notifyEmployee(employeeId, { title, message, type, link }) {
   try {
-    const { default: Seller } = await import("../models/seller.model.js");
-    const seller = await Seller.findById(sellerId).select("user");
-    if (seller?.user) await notify({ userId: seller.user, title, message, type, link });
+    const { default: Employee } = await import("../models/seller.model.js");
+    const employee = await Employee.findById(employeeId).select("user");
+    if (employee?.user) await notify({ userId: employee.user, title, message, type, link });
   } catch { /* silent */ }
 }

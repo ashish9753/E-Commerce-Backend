@@ -1,6 +1,6 @@
 import Product from "../models/product.model.js";
 import InventoryLog from "../models/inventoryLog.model.js";
-import Seller from "../models/seller.model.js";
+import Employee from "../models/seller.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
@@ -10,10 +10,10 @@ export const restockProduct = async (req, res, next) => {
     const { productId, quantity, note } = req.body;
     if (!productId || !quantity || quantity < 1) throw new ApiError(400, "productId and quantity (>0) required");
 
-    const seller = req.user.role === "admin" ? null : await Seller.findOne({ user: req.user._id });
+    const employee = req.user.role === "admin" ? null : await Employee.findOne({ user: req.user._id });
 
     const filter = { _id: productId, isDeleted: false };
-    if (seller) filter.seller = seller._id;
+    if (employee) filter.employee = employee._id;
 
     const product = await Product.findOneAndUpdate(
       filter,

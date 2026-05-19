@@ -1,10 +1,10 @@
 import ReturnRequest from "../models/returnRequest.model.js";
 import Order         from "../models/order.model.js";
 import Product       from "../models/product.model.js";
-import Seller        from "../models/seller.model.js";
+import Employee      from "../models/seller.model.js";
 import InventoryLog  from "../models/inventoryLog.model.js";
 import Notification  from "../models/notification.model.js";
-import { notify, notifySeller, notifyAdmins } from "../utils/notify.js";
+import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
@@ -26,13 +26,13 @@ export const createReturnRequest = async (req, res, next) => {
     const existing = await ReturnRequest.findOne({ order: orderId, user: req.user._id });
     if (existing) throw new ApiError(409, "Return request already submitted for this order");
 
-    // Find which seller owns the product — fall back to first item in order if no productId given
-    let sellerId = null;
+    // Find which employee owns the product — fall back to first item in order if no productId given
+    let employeeId = null;
     const lookupId = productId || order.orderItems?.[0]?.product;
     let returnableProduct = null;
     if (lookupId) {
-      returnableProduct = await Product.findById(lookupId).select("seller returnable returnWindow");
-      if (returnableProduct) sellerId = returnableProduct.seller;
+      returnableProduct = await Product.findById(lookupId).select("employee returnable returnWindow");
+      if (returnableProduct) employeeId = returnableProduct.employee;
     }
 
     // Validate return policy
@@ -55,7 +55,7 @@ export const createReturnRequest = async (req, res, next) => {
       order:        orderId,
       user:         req.user._id,
       product:      productId || null,
-      seller:       sellerId,
+      employee:     employeeId,
       reason,
       description,
       resolution:   resolution || "refund",
@@ -70,18 +70,18 @@ export const createReturnRequest = async (req, res, next) => {
     await notify({
       userId:  req.user._id,
       title:   "Return Request Submitted ↩️",
-      message: `Your return request for order #${order.orderNumber} has been submitted. The seller will review it within 48 hours.`,
+      message: `Your return request for order #${order.orderNumber} has been submitted. The employee will review it within 48 hours.`,
       type:    "REFUND",
       link:    `/return-status/${returnReq._id}`,
     });
 
-    // Notify seller — they must act first
-    if (sellerId) {
-      await notifySeller(sellerId, {
+    // Notify employee — they must act first
+    if (employeeId) {
+      await notifyEmployee(employeeId, {
         title:   "New Return Request ⚠️",
         message: `Customer requested a return for order #${order.orderNumber}. Please approve or reject within 48 hours.`,
         type:    "REFUND",
-        link:    "/seller",
+        link:    "/employee",
       });
     }
 
@@ -122,7 +122,7 @@ export const updateRefundMethod = async (req, res, next) => {
     const ret = await ReturnRequest.findOne({ _id: req.params.requestId, user: req.user._id })
       .populate("order", "paymentMethod");
     if (!ret) throw new ApiError(404, "Return request not found");
-    if (!["REQUESTED", "SELLER_APPROVED", "APPROVED"].includes(ret.status)) {
+    if (!["REQUESTED", "EMPLOYEE_APPROVED", "APPROVED"].includes(ret.status)) {
       throw new ApiError(400, "Refund method cannot be changed at this stage");
     }
 
@@ -159,21 +159,21 @@ export const getMyReturnRequests = async (req, res, next) => {
   }
 };
 
-/* ─── Seller: get returns for their products ─── */
-export const getSellerReturnRequests = async (req, res, next) => {
+/* ─── Employee: get returns for their products ─── */
+export const getEmployeeReturnRequests = async (req, res, next) => {
   try {
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(403, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(403, "Employee profile not found");
 
-    // Also pick up legacy returns where seller field wasn't set — match via order's product list
-    const sellerProducts = await Product.find({ seller: seller._id }).select("_id");
-    const sellerProductIds = sellerProducts.map(p => p._id);
+    // Also pick up legacy returns where employee field wasn't set — match via order's product list
+    const employeeProducts = await Product.find({ employee: employee._id }).select("_id");
+    const employeeProductIds = employeeProducts.map(p => p._id);
 
     const { page, limit, skip } = getPaginationData(req.query);
     const baseFilter = {
       $or: [
-        { seller: seller._id },
-        { product: { $in: sellerProductIds } },
+        { employee: employee._id },
+        { product: { $in: employeeProductIds } },
       ],
     };
     if (req.query.status) baseFilter.status = req.query.status;
@@ -192,38 +192,38 @@ export const getSellerReturnRequests = async (req, res, next) => {
   }
 };
 
-/* ─── Seller: approve or reject ─── */
-export const sellerActionOnReturn = async (req, res, next) => {
+/* ─── Employee: approve or reject ─── */
+export const employeeActionOnReturn = async (req, res, next) => {
   try {
     const { action, note } = req.body; // action: "approve" | "reject"
     if (!["approve", "reject"].includes(action)) throw new ApiError(400, "action must be approve or reject");
 
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(403, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(403, "Employee profile not found");
 
-    const sellerProducts = await Product.find({ seller: seller._id }).select("_id");
-    const sellerProductIds = sellerProducts.map(p => p._id);
+    const employeeProducts = await Product.find({ employee: employee._id }).select("_id");
+    const employeeProductIds = employeeProducts.map(p => p._id);
 
     const returnReq = await ReturnRequest.findOne({
       _id: req.params.requestId,
-      $or: [{ seller: seller._id }, { product: { $in: sellerProductIds } }],
+      $or: [{ employee: employee._id }, { product: { $in: employeeProductIds } }],
     });
     if (!returnReq) throw new ApiError(404, "Return request not found");
-    // Seller can act on REQUESTED or re-act if admin sends back (REQUESTED only for now)
+    // Employee can act on REQUESTED or re-act if admin sends back (REQUESTED only for now)
     if (!["REQUESTED"].includes(returnReq.status)) {
       throw new ApiError(400, "This return has already been actioned");
     }
 
-    // On approve: skip admin — jump straight to PICKUP_SCHEDULED so seller can process refund
-    const newStatus = action === "approve" ? "PICKUP_SCHEDULED" : "SELLER_REJECTED";
-    returnReq.status         = newStatus;
-    returnReq.sellerNote     = note;
-    returnReq.sellerActionAt = new Date();
+    // On approve: skip admin — jump straight to PICKUP_SCHEDULED so employee can process refund
+    const newStatus = action === "approve" ? "PICKUP_SCHEDULED" : "EMPLOYEE_REJECTED";
+    returnReq.status          = newStatus;
+    returnReq.employeeNote     = note;
+    returnReq.employeeActionAt = new Date();
     if (action === "approve") {
-      pushTimeline(returnReq, "SELLER_APPROVED", note || "Seller approved the return", "seller");
+      pushTimeline(returnReq, "EMPLOYEE_APPROVED", note || "Employee approved the return", "employee");
       pushTimeline(returnReq, "PICKUP_SCHEDULED", "Pickup scheduled — awaiting item collection", "system");
     } else {
-      pushTimeline(returnReq, newStatus, note || "Seller rejected the return", "seller");
+      pushTimeline(returnReq, newStatus, note || "Employee rejected the return", "employee");
     }
     await returnReq.save();
 
@@ -232,41 +232,41 @@ export const sellerActionOnReturn = async (req, res, next) => {
       userId:  returnReq.user,
       title:   action === "approve" ? "Return Approved ✅" : "Return Rejected ❌",
       message: action === "approve"
-        ? `Your return for order has been approved! The seller will arrange pickup shortly.${note ? " Note: " + note : ""}`
-        : `Your return request has been rejected by the seller.${note ? " Reason: " + note : ""} Contact support to appeal.`,
+        ? `Your return for order has been approved! The employee will arrange pickup shortly.${note ? " Note: " + note : ""}`
+        : `Your return request has been rejected by the employee.${note ? " Reason: " + note : ""} Contact support to appeal.`,
       type:    "REFUND",
       link:    `/return-status/${returnReq._id}`,
     });
 
     if (action === "reject") {
-      pushTimeline(returnReq, newStatus, "Admin review recommended — seller rejected this return", "system");
+      pushTimeline(returnReq, newStatus, "Admin review recommended — employee rejected this return", "system");
       await returnReq.save();
     }
 
-    res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return ${action}d by seller`));
+    res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return ${action}d by employee`));
   } catch (err) {
     next(err);
   }
 };
 
-/* ─── Seller: advance return through refund pipeline ─── */
-export const sellerAdvanceReturn = async (req, res, next) => {
+/* ─── Employee: advance return through refund pipeline ─── */
+export const employeeAdvanceReturn = async (req, res, next) => {
   try {
     const { note } = req.body;
 
-    const seller = await Seller.findOne({ user: req.user._id });
-    if (!seller) throw new ApiError(403, "Seller profile not found");
+    const employee = await Employee.findOne({ user: req.user._id });
+    if (!employee) throw new ApiError(403, "Employee profile not found");
 
-    const sellerProducts = await Product.find({ seller: seller._id }).select("_id");
-    const sellerProductIds = sellerProducts.map(p => p._id);
+    const employeeProducts = await Product.find({ employee: employee._id }).select("_id");
+    const employeeProductIds = employeeProducts.map(p => p._id);
 
     const returnReq = await ReturnRequest.findOne({
       _id: req.params.requestId,
-      $or: [{ seller: seller._id }, { product: { $in: sellerProductIds } }],
+      $or: [{ employee: employee._id }, { product: { $in: employeeProductIds } }],
     });
     if (!returnReq) throw new ApiError(404, "Return request not found");
 
-    // Seller can advance from APPROVED (admin-approved) or their own pickup pipeline
+    // Employee can advance from APPROVED (admin-approved) or their own pickup pipeline
     const pipeline = {
       APPROVED:         "PICKUP_SCHEDULED",
       PICKUP_SCHEDULED: "ITEM_RECEIVED",
@@ -305,13 +305,13 @@ export const sellerAdvanceReturn = async (req, res, next) => {
       });
     }
 
-    pushTimeline(returnReq, nextStatus, note || `Seller marked: ${nextStatus.replace(/_/g, " ")}`, "seller");
+    pushTimeline(returnReq, nextStatus, note || `Employee marked: ${nextStatus.replace(/_/g, " ")}`, "employee");
     await returnReq.save();
 
     // Notify customer with rich status messages
     const customerMessages = {
       PICKUP_SCHEDULED: { title: "Pickup Scheduled 🚚",       message: "Your return pickup has been scheduled. Please keep the item ready for collection." },
-      ITEM_RECEIVED:    { title: "Item Received 📬",           message: "Your returned item has been received by the seller. Refund processing has started." },
+      ITEM_RECEIVED:    { title: "Item Received 📬",           message: "Your returned item has been received by the employee. Refund processing has started." },
       REFUND_INITIATED: { title: "Refund Initiated 💸",        message: "Your refund has been initiated and is being processed. It may take 3-7 business days." },
       REFUND_COMPLETED: { title: "Refund Completed! 🎉",       message: "Your refund has been completed! The amount will reflect in your account shortly." },
     };
@@ -407,7 +407,7 @@ export const processReturnRequest = async (req, res, next) => {
     }
 
     const adminStatusMessages = {
-      APPROVED:          { title: "Return Approved ✅",       message: "Your return request has been approved by admin. The seller will arrange pickup." },
+      APPROVED:          { title: "Return Approved ✅",       message: "Your return request has been approved by admin. The employee will arrange pickup." },
       REJECTED:          { title: "Return Rejected ❌",       message: "Your return request has been rejected by admin." },
       PICKUP_SCHEDULED:  { title: "Pickup Scheduled 🚚",      message: "Your return pickup has been scheduled." },
       ITEM_RECEIVED:     { title: "Item Received 📬",          message: "Your returned item has been received. Refund is being processed." },
@@ -427,18 +427,18 @@ export const processReturnRequest = async (req, res, next) => {
       link:    `/return-status/${returnReq._id}`,
     });
 
-    // Notify seller on admin approval/rejection
-    if (returnReq.seller) {
-      const sellerMsg = {
+    // Notify employee on admin approval/rejection
+    if (returnReq.employee) {
+      const employeeMsg = {
         APPROVED: "Admin has approved a return request for your product. Please arrange pickup.",
         REJECTED: "Admin has rejected a return request for your product.",
       }[status];
-      if (sellerMsg) {
-        await notifySeller(returnReq.seller, {
+      if (employeeMsg) {
+        await notifyEmployee(returnReq.employee, {
           title:   `Return ${status} by Admin`,
-          message: sellerMsg + (adminNote ? ` Note: ${adminNote}` : ""),
+          message: employeeMsg + (adminNote ? ` Note: ${adminNote}` : ""),
           type:    "REFUND",
-          link:    "/seller",
+          link:    "/employee",
         });
       }
     }

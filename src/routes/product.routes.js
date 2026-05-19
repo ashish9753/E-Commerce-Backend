@@ -16,9 +16,9 @@ router.get("/slug/:slug", optionalAuth, getProductBySlug);
 router.get("/:productId", getProductById);
 
 router.use(protect);
-router.post("/", authorize("seller", "admin"), uploadMultiple("images", 5), createProduct);
-router.get("/seller/my-products", authorize("seller", "admin"), getMyProducts);
-router.patch("/:productId", authorize("seller", "admin"), uploadMultiple("images", 5), updateProduct);
-router.delete("/:productId", authorize("seller", "admin"), deleteProduct);
+router.post("/", authorize("employee", "admin"), uploadMultiple("images", 5), createProduct);
+router.get("/employee/my-products", authorize("employee", "admin"), getMyProducts);
+router.patch("/:productId", authorize("employee", "admin"), uploadMultiple("images", 5), updateProduct);
+router.delete("/:productId", authorize("employee", "admin"), deleteProduct);
 
 export default router;

@@ -61,6 +61,9 @@ const orderSchema = new mongoose.Schema(
     estimatedDeliveryDate: Date,
     deliveredAt: Date,
     paidAt: Date,
+    codBookingAmount:  { type: Number, default: 0 },
+    codBookingUtr:     { type: String, default: "" },   // UPI transaction ref
+    codBookingStatus:  { type: String, enum: ["NOT_REQUIRED", "PENDING", "PAID"], default: "NOT_REQUIRED" },
   },
   { timestamps: true }
 );

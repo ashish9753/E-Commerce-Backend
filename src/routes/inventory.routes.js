@@ -10,9 +10,9 @@ const router = Router();
 
 router.use(protect);
 
-router.post("/restock", authorize("seller", "admin"), restockProduct);
+router.post("/restock", authorize("employee", "admin"), restockProduct);
 router.patch("/adjust", authorize("admin"), adjustStock);
-router.get("/logs", authorize("seller", "admin"), getInventoryLogs);
-router.get("/low-stock", authorize("seller", "admin"), getLowStockProducts);
+router.get("/logs", authorize("employee", "admin"), getInventoryLogs);
+router.get("/low-stock", authorize("employee", "admin"), getLowStockProducts);
 
 export default router;
