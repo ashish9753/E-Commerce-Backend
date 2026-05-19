@@ -35,32 +35,35 @@ export const processOrderJob = async (job) => {
     estimatedDeliveryDate,
   } = job.data;
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  // Standalone MongoDB (no replica set) cannot use transactions.
+  // In dev (SKIP_QUEUE=true) we run without sessions; in prod the Bull queue
+  // runs this inside a real replica set where transactions are available.
+  const useTransaction = process.env.SKIP_QUEUE !== "true";
+
+  let session = null;
+  if (useTransaction) {
+    session = await mongoose.startSession();
+    session.startTransaction();
+  }
+
+  const so = (opts) => (session ? { ...opts, session } : opts ?? {});
 
   const decremented = [];
 
   try {
-    // --- Step 1: Atomic stock check + decrement (one at a time, serialized by queue) ---
+    // --- Step 1: Stock check + decrement ---
     for (const item of orderItems) {
       const product = await Product.findOneAndUpdate(
-        {
-          _id: item.product,
-          stock: { $gte: item.quantity },
-          isDeleted: false,
-          isPublished: true,
-        },
+        { _id: item.product, stock: { $gte: item.quantity }, isDeleted: false, isPublished: true },
         { $inc: { stock: -item.quantity, sold: item.quantity } },
-        { new: true, session }
+        so({ new: true })
       );
 
       if (!product) {
-        // Could not decrement — either out of stock or product unavailable
-        const outOfStock = await Product.findById(item.product).session(session);
+        const outOfStock = await Product.findById(item.product);
         const reason = !outOfStock || outOfStock.isDeleted
           ? `Product "${item.title}" is no longer available`
           : `"${item.title}" is out of stock. Available: ${outOfStock.stock}, Requested: ${item.quantity}`;
-
         throw new Error(reason);
       }
 
@@ -68,28 +71,30 @@ export const processOrderJob = async (job) => {
     }
 
     // --- Step 2: Create Order ---
-    const [order] = await Order.create(
-      [
-        {
-          user: userId,
-          orderItems,
-          shippingAddress,
-          paymentMethod,
-          paymentStatus: paymentMethod === "COD" ? "PENDING" : "PENDING",
-          itemsPrice,
-          shippingPrice,
-          taxPrice,
-          discountAmount,
-          totalPrice,
-          coupon: couponId || null,
-          estimatedDeliveryDate: estimatedDeliveryDate
-            ? new Date(estimatedDeliveryDate)
-            : new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
-          statusHistory: [{ status: "PLACED", timestamp: new Date() }],
-        },
-      ],
-      { session }
-    );
+    const orderDoc = {
+      user: userId,
+      orderItems,
+      shippingAddress,
+      paymentMethod,
+      paymentStatus: "PENDING",
+      itemsPrice,
+      shippingPrice,
+      taxPrice,
+      discountAmount,
+      totalPrice,
+      coupon: couponId || null,
+      estimatedDeliveryDate: estimatedDeliveryDate
+        ? new Date(estimatedDeliveryDate)
+        : new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
+      statusHistory: [{ status: "PLACED", timestamp: new Date() }],
+    };
+
+    let order;
+    if (session) {
+      [order] = await Order.create([orderDoc], { session });
+    } else {
+      order = await Order.create(orderDoc);
+    }
 
     // --- Step 3: Log inventory changes ---
     const inventoryLogs = decremented.map(({ product, quantity, oldStock }) => ({
@@ -102,52 +107,49 @@ export const processOrderJob = async (job) => {
       note: `Order ${order.orderNumber} placed`,
       performedBy: userId,
     }));
-    await InventoryLog.insertMany(inventoryLogs, { session });
+    await InventoryLog.insertMany(inventoryLogs, so());
 
     // --- Step 4: Mark coupon as used ---
     if (couponId) {
       await Coupon.findByIdAndUpdate(
         couponId,
         { $inc: { usedCount: 1 }, $addToSet: { usedBy: userId } },
-        { session }
+        so()
       );
     }
 
     // --- Step 5: Clear user cart ---
     await Cart.findOneAndUpdate(
       { user: userId },
-      {
-        items: [],
-        coupon: null,
-        totalItems: 0,
-        totalPrice: 0,
-        discountAmount: 0,
-        finalPrice: 0,
-      },
-      { session }
+      { items: [], coupon: null, totalItems: 0, totalPrice: 0, discountAmount: 0, finalPrice: 0 },
+      so()
     );
 
     // --- Step 6: In-app notification ---
-    await Notification.create(
-      [
-        {
-          user: userId,
-          title: "Order Placed Successfully!",
-          message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}`,
-          type: "ORDER",
-          link: `/orders/${order._id}`,
-        },
-      ],
-      { session }
-    );
+    const notifDoc = {
+      user: userId,
+      title: "Order Placed Successfully!",
+      message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}`,
+      type: "ORDER",
+      link: `/orders/${order._id}`,
+    };
+    if (session) {
+      await Notification.create([notifDoc], { session });
+    } else {
+      await Notification.create(notifDoc);
+    }
 
-    await session.commitTransaction();
-    session.endSession();
+    if (session) {
+      await session.commitTransaction();
+      session.endSession();
+    }
 
     return { orderId: order._id.toString(), orderNumber: order.orderNumber };
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
+    if (session) {
+      await session.abortTransaction();
+      session.endSession();
+    }
     throw err;
   }
 };

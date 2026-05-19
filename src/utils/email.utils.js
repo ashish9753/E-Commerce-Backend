@@ -11,12 +11,17 @@ const transporter = nodemailer.createTransport({
 });
 
 export const sendEmail = async ({ to, subject, html }) => {
-  await transporter.sendMail({
-    from: `"E-Commerce" <${process.env.SMTP_FROM}>`,
-    to,
-    subject,
-    html,
-  });
+  if (!process.env.SMTP_HOST || process.env.SMTP_HOST === 'smtp.example.com') return;
+  try {
+    await transporter.sendMail({
+      from: `"E-Commerce" <${process.env.SMTP_FROM}>`,
+      to,
+      subject,
+      html,
+    });
+  } catch {
+    // Non-fatal in dev — SMTP not configured
+  }
 };
 
 export const orderConfirmationEmail = (order, user) => ({

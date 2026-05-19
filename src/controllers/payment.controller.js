@@ -5,10 +5,19 @@ import Payment from "../models/payment.model.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
+let _razorpay = null;
+const getRazorpay = () => {
+  if (!_razorpay) {
+    if (!process.env.RAZORPAY_KEY_ID || process.env.RAZORPAY_KEY_ID.startsWith('rzp_test_dummy')) {
+      throw new ApiError(503, "Online payments are disabled in this environment");
+    }
+    _razorpay = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID,
+      key_secret: process.env.RAZORPAY_KEY_SECRET,
+    });
+  }
+  return _razorpay;
+};
 
 export const createRazorpayOrder = async (req, res, next) => {
   try {
@@ -18,7 +27,7 @@ export const createRazorpayOrder = async (req, res, next) => {
     if (order.user.toString() !== req.user._id.toString()) throw new ApiError(403, "Access denied");
     if (order.paymentStatus === "PAID") throw new ApiError(400, "Order already paid");
 
-    const razorpayOrder = await razorpay.orders.create({
+    const razorpayOrder = await getRazorpay().orders.create({
       amount: Math.round(order.totalPrice * 100),
       currency: "INR",
       receipt: order.orderNumber,

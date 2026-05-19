@@ -2,7 +2,8 @@ import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import Coupon from "../models/coupon.model.js";
-import orderQueue from "../queues/order.queue.js";
+import Seller from "../models/seller.model.js";
+import Notification from "../models/notification.model.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
@@ -94,8 +95,7 @@ export const placeOrder = async (req, res, next) => {
 
     const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
 
-    // Add to queue — queue serializes concurrent requests (concurrency=1)
-    const job = await orderQueue.add({
+    const jobData = {
       userId: user._id.toString(),
       orderItems,
       shippingAddress: address.toObject(),
@@ -106,10 +106,18 @@ export const placeOrder = async (req, res, next) => {
       discountAmount,
       totalPrice,
       couponId: couponId?.toString() || null,
-    });
+    };
 
-    // Wait for queue to finish (with 25s timeout)
-    const result = await job.finished();
+    let result;
+    if (process.env.SKIP_QUEUE === "true") {
+      // Dev mode: process order directly without Redis/Bull
+      const { processOrderJob } = await import("../queues/order.processor.js");
+      result = await processOrderJob({ data: jobData });
+    } else {
+      const { default: orderQueue } = await import("../queues/order.queue.js");
+      const job = await orderQueue.add(jobData);
+      result = await job.finished();
+    }
 
     // Fetch full order to return
     const order = await Order.findById(result.orderId)
@@ -252,6 +260,98 @@ export const updateOrderStatus = async (req, res, next) => {
 
     await order.save();
     res.json(new ApiResponse(200, { order }, "Order status updated"));
+  } catch (err) {
+    next(err);
+  }
+};
+
+/* Seller: update order status (restricted — cannot cancel or set PLACED/RETURNED) */
+export const sellerUpdateOrderStatus = async (req, res, next) => {
+  try {
+    const { status, trackingId, note } = req.body;
+
+    // Sellers can only move orders forward through fulfilment pipeline
+    const sellerAllowedStatuses = ["CONFIRMED", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY", "DELIVERED"];
+    if (!sellerAllowedStatuses.includes(status)) {
+      throw new ApiError(400, `Sellers can only set status to: ${sellerAllowedStatuses.join(", ")}`);
+    }
+
+    const seller = await Seller.findOne({ user: req.user._id });
+    if (!seller) throw new ApiError(403, "Seller profile not found");
+
+    const order = await Order.findById(req.params.orderId);
+    if (!order) throw new ApiError(404, "Order not found");
+
+    // Ensure this order contains at least one of the seller's products
+    const sellerProductIds = (await Product.find({ seller: seller._id }).select("_id")).map(p => p._id.toString());
+    const hasSellerProduct = order.orderItems.some(item => sellerProductIds.includes(item.product?.toString()));
+    if (!hasSellerProduct) throw new ApiError(403, "This order does not contain your products");
+
+    order.orderStatus = status;
+    order.statusHistory.push({ status, note: note || `Status updated by seller`, timestamp: new Date() });
+    if (trackingId) order.trackingId = trackingId;
+    if (status === "DELIVERED") {
+      order.deliveredAt  = new Date();
+      order.paymentStatus = "PAID";
+      order.paidAt       = new Date();
+    }
+
+    await order.save();
+
+    // Notify customer
+    await Notification.create({
+      user:    order.user,
+      title:   `Order ${status.replace(/_/g, " ")}`,
+      message: `Your order #${order.orderNumber} has been updated to: ${status.replace(/_/g, " ")}.${note ? " " + note : ""}`,
+      type:    "ORDER",
+    });
+
+    res.json(new ApiResponse(200, { order }, "Order status updated"));
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const getSellerOrders = async (req, res, next) => {
+  try {
+    const seller = await Seller.findOne({ user: req.user._id });
+    if (!seller) throw new ApiError(404, "Seller profile not found");
+
+    const products = await Product.find({ seller: seller._id }).select("_id");
+    const productIds = products.map((p) => p._id);
+
+    const { page, limit, skip } = getPaginationData(req.query);
+    const filter = { "orderItems.product": { $in: productIds } };
+    if (req.query.status) filter.orderStatus = req.query.status;
+
+    const [orders, total] = await Promise.all([
+      Order.find(filter)
+        .populate("user", "name email phone")
+        .populate("orderItems.product", "title images price discountPrice")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Order.countDocuments(filter),
+    ]);
+
+    // Revenue for this seller = sum of orderItems that belong to seller's products
+    const revenueAgg = await Order.aggregate([
+      { $match: { "orderItems.product": { $in: productIds }, paymentStatus: "PAID" } },
+      { $unwind: "$orderItems" },
+      { $match: { "orderItems.product": { $in: productIds } } },
+      { $group: { _id: null, total: { $sum: { $multiply: ["$orderItems.price", "$orderItems.quantity"] } } } },
+    ]);
+
+    const statusAgg = await Order.aggregate([
+      { $match: { "orderItems.product": { $in: productIds } } },
+      { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
+    ]);
+
+    res.json(new ApiResponse(200, {
+      ...buildPaginatedResponse(orders, total, page, limit),
+      sellerRevenue: revenueAgg[0]?.total || 0,
+      statusBreakdown: statusAgg,
+    }));
   } catch (err) {
     next(err);
   }
