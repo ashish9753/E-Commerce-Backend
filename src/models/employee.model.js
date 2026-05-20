@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-const sellerSchema = new mongoose.Schema(
+const employeeSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, unique: true },
     shopName: { type: String, required: true, trim: true },
@@ -17,4 +17,4 @@ const sellerSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-export default mongoose.model("Employee", sellerSchema);
+export default mongoose.model("Employee", employeeSchema);

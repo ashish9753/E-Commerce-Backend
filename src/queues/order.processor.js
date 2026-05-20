@@ -5,7 +5,7 @@ import Cart from "../models/cart.model.js";
 import Coupon from "../models/coupon.model.js";
 import InventoryLog from "../models/inventoryLog.model.js";
 import Notification from "../models/notification.model.js";
-import Employee from "../models/seller.model.js";
+import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { pushToUser } from "../utils/sseClients.js";
 

@@ -1,5 +1,5 @@
 import Product from "../models/product.model.js";
-import Employee from "../models/seller.model.js";
+import Employee from "../models/employee.model.js";
 import RecentlyViewed from "../models/recentlyViewed.model.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { generateUniqueSlug } from "../utils/slugify.utils.js";
@@ -147,9 +147,15 @@ export const updateProduct = async (req, res, next) => {
     if (updates.stock !== undefined) updates.stock = parseInt(updates.stock);
     if (updates.returnable !== undefined) updates.returnable = updates.returnable === false || updates.returnable === "false" ? false : true;
     if (updates.returnWindow !== undefined) updates.returnWindow = [7, 10].includes(parseInt(updates.returnWindow)) ? parseInt(updates.returnWindow) : 7;
+    // keepImages lets the frontend specify which existing images to retain (removes the rest)
+    if (req.body.keepImages !== undefined) {
+      const keep = Array.isArray(req.body.keepImages) ? req.body.keepImages : [req.body.keepImages];
+      updates.images = keep.filter(Boolean);
+    }
     if (req.files?.length) {
       const uploads = await Promise.all(req.files.map((f) => uploadToCloudinary(f.buffer, "ecommerce/products")));
-      updates.images = [...product.images, ...uploads.map((r) => r.secure_url)];
+      const base = updates.images ?? product.images;
+      updates.images = [...base, ...uploads.map((r) => r.secure_url)];
     }
 
     const updated = await Product.findByIdAndUpdate(req.params.productId, updates, { new: true });

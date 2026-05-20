@@ -37,7 +37,7 @@ export async function notifyAdmins({ title, message, type, link }) {
  */
 export async function notifyEmployee(employeeId, { title, message, type, link }) {
   try {
-    const { default: Employee } = await import("../models/seller.model.js");
+    const { default: Employee } = await import("../models/employee.model.js");
     const employee = await Employee.findById(employeeId).select("user");
     if (employee?.user) await notify({ userId: employee.user, title, message, type, link });
   } catch { /* silent */ }

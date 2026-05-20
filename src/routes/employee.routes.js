@@ -2,7 +2,7 @@ import { Router } from "express";
 import {
   registerEmployee, getMyEmployeeProfile, updateEmployeeProfile, uploadShopLogo,
   getAllEmployees, verifyEmployee, getEmployeeById, adminCreateEmployee,
-} from "../controllers/seller.controller.js";
+} from "../controllers/employee.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
 import { uploadSingle } from "../middleware/upload.middleware.js";

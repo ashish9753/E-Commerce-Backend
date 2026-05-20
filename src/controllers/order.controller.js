@@ -2,7 +2,7 @@ import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import Coupon from "../models/coupon.model.js";
-import Employee from "../models/seller.model.js";
+import Employee from "../models/employee.model.js";
 import Notification from "../models/notification.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";

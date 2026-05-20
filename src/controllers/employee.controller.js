@@ -1,4 +1,4 @@
-import Employee from "../models/seller.model.js";
+import Employee from "../models/employee.model.js";
 import User from "../models/user.model.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";

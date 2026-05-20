@@ -1,6 +1,6 @@
 import Product from "../models/product.model.js";
 import InventoryLog from "../models/inventoryLog.model.js";
-import Employee from "../models/seller.model.js";
+import Employee from "../models/employee.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
