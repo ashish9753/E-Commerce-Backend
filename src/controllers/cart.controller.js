@@ -38,16 +38,14 @@ export const addToCart = async (req, res, next) => {
     const qty = Math.max(1, parseInt(quantity));
     const product = await Product.findOne({ _id: productId, isDeleted: false, isPublished: true });
     if (!product) throw new ApiError(404, "Product not found");
-    if (product.stock < qty) throw new ApiError(400, `Only ${product.stock} units available`);
+    if (product.stock === 0) throw new ApiError(400, "This product is out of stock");
 
     const price = product.discountPrice || product.price;
     const cart = await getOrCreateCart(req.user._id);
 
     const existingIndex = cart.items.findIndex((i) => i.product.toString() === productId);
     if (existingIndex > -1) {
-      const newQty = cart.items[existingIndex].quantity + qty;
-      if (newQty > product.stock) throw new ApiError(400, `Only ${product.stock} units available`);
-      cart.items[existingIndex].quantity = newQty;
+      cart.items[existingIndex].quantity += qty;
     } else {
       cart.items.push({ product: productId, quantity: qty, price });
     }
@@ -70,7 +68,6 @@ export const updateCartItem = async (req, res, next) => {
 
     const product = await Product.findById(productId);
     if (!product) throw new ApiError(404, "Product not found");
-    if (product.stock < qty) throw new ApiError(400, `Only ${product.stock} units available`);
 
     const cart = await Cart.findOne({ user: req.user._id });
     if (!cart) throw new ApiError(404, "Cart not found");

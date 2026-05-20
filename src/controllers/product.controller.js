@@ -34,7 +34,7 @@ export const createProduct = async (req, res, next) => {
       discountPrice: discountPrice ? parseFloat(discountPrice) : undefined,
       stock: parseInt(stock) || 0,
       tags: tags ? (Array.isArray(tags) ? tags : tags.split(",").map((t) => t.trim())) : [],
-      specifications: specifications ? (typeof specifications === "string" ? JSON.parse(specifications) : specifications) : {},
+      specifications: specifications ? new Map(Object.entries(typeof specifications === "string" ? JSON.parse(specifications) : specifications)) : new Map(),
       isFeatured:   isFeatured === "true" || isFeatured === true,
       returnable:   returnable === false || returnable === "false" ? false : true,
       returnWindow: [7, 10].includes(parseInt(returnWindow)) ? parseInt(returnWindow) : 7,
@@ -143,6 +143,10 @@ export const updateProduct = async (req, res, next) => {
     if (updates.stock !== undefined) updates.stock = parseInt(updates.stock);
     if (updates.returnable !== undefined) updates.returnable = updates.returnable === false || updates.returnable === "false" ? false : true;
     if (updates.returnWindow !== undefined) updates.returnWindow = [7, 10].includes(parseInt(updates.returnWindow)) ? parseInt(updates.returnWindow) : 7;
+    if (updates.specifications !== undefined) {
+      const raw = typeof updates.specifications === "string" ? JSON.parse(updates.specifications) : updates.specifications;
+      updates.specifications = new Map(Object.entries(raw));
+    }
     // keepImages lets the frontend specify which existing images to retain (removes the rest)
     if (req.body.keepImages !== undefined) {
       const keep = Array.isArray(req.body.keepImages) ? req.body.keepImages : [req.body.keepImages];

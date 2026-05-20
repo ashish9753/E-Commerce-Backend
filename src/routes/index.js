@@ -21,6 +21,7 @@ import brandRoutes from "./brand.routes.js";
 import attributeRoutes from "./attribute.routes.js";
 import eventRoutes from "./event.routes.js";
 import settingsRoutes from "./settings.routes.js";
+import deliveryAreaRoutes from "./deliveryArea.routes.js";
 
 const router = Router();
 
@@ -45,5 +46,6 @@ router.use("/brands", brandRoutes);
 router.use("/attributes", attributeRoutes);
 router.use("/events", eventRoutes);
 router.use("/settings", settingsRoutes);
+router.use("/delivery-areas", deliveryAreaRoutes);
 
 export default router;
