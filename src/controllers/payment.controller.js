@@ -19,6 +19,29 @@ const getRazorpay = () => {
   return _razorpay;
 };
 
+export const createBookingOrder = async (req, res, next) => {
+  try {
+    const { amount } = req.body;
+    if (!amount || amount <= 0) throw new ApiError(400, "Invalid booking amount");
+
+    const razorpayOrder = await getRazorpay().orders.create({
+      amount: Math.round(amount * 100),
+      currency: "INR",
+      receipt: `bkg_${Date.now().toString().slice(-10)}`,
+      notes: { type: "cod_booking", userId: req.user._id.toString() },
+    });
+
+    res.json(new ApiResponse(200, {
+      razorpayOrderId: razorpayOrder.id,
+      amount: razorpayOrder.amount,
+      currency: razorpayOrder.currency,
+      keyId: process.env.RAZORPAY_KEY_ID,
+    }));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const createRazorpayOrder = async (req, res, next) => {
   try {
     const { orderId } = req.body;
@@ -118,6 +141,54 @@ export const getAllPayments = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .limit(100);
     res.json(new ApiResponse(200, { payments }));
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const initiateRefund = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const { refundAmount, reason = "refund" } = req.body;
+
+    const payment = await Payment.findOne({ order: orderId });
+    if (!payment) throw new ApiError(404, "No payment record found for this order");
+    if (payment.paymentStatus !== "SUCCESS") throw new ApiError(400, "Payment is not in SUCCESS state — cannot refund");
+    if (payment.paymentStatus === "REFUNDED") throw new ApiError(400, "Already refunded");
+    if (!payment.razorpayPaymentId) throw new ApiError(400, "No Razorpay payment ID on record — cannot initiate refund");
+
+    const amountPaise = Math.round((refundAmount || payment.amount) * 100);
+
+    let refund;
+    try {
+      refund = await getRazorpay().payments.refund(payment.razorpayPaymentId, {
+        amount: amountPaise,
+        speed: "normal",
+        notes: { orderId: orderId.toString(), reason },
+      });
+    } catch (rzpErr) {
+      const msg = rzpErr?.error?.description || rzpErr?.message || "Razorpay API error";
+      throw new ApiError(422, `Razorpay refund failed: ${msg}`);
+    }
+
+    const updated = await Payment.findOneAndUpdate(
+      { order: orderId },
+      {
+        paymentStatus: "REFUNDED",
+        refundId: refund.id,
+        refundAmount: refund.amount / 100,
+        refundedAt: new Date(),
+      },
+      { new: true }
+    );
+
+    const order = await Order.findByIdAndUpdate(
+      orderId,
+      { paymentStatus: "REFUNDED" },
+      { new: true }
+    );
+
+    res.json(new ApiResponse(200, { refund, payment: updated, order }, "Refund initiated successfully"));
   } catch (err) {
     next(err);
   }

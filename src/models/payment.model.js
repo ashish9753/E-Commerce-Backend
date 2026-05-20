@@ -18,6 +18,9 @@ const paymentSchema = new mongoose.Schema(
     currency: { type: String, default: "INR" },
     paidAt: Date,
     failureReason: String,
+    refundId: String,
+    refundAmount: Number,
+    refundedAt: Date,
   },
   { timestamps: true }
 );

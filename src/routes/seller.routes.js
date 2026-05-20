@@ -1,7 +1,7 @@
 import { Router } from "express";
 import {
   registerEmployee, getMyEmployeeProfile, updateEmployeeProfile, uploadShopLogo,
-  getAllEmployees, verifyEmployee, getEmployeeById,
+  getAllEmployees, verifyEmployee, getEmployeeById, adminCreateEmployee,
 } from "../controllers/seller.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
@@ -16,6 +16,7 @@ router.get("/me", authorize("employee", "admin"), getMyEmployeeProfile);
 router.patch("/me", authorize("employee", "admin"), updateEmployeeProfile);
 router.patch("/me/logo", authorize("employee", "admin"), uploadSingle("shopLogo"), uploadShopLogo);
 
+router.post("/admin/create", authorize("admin"), adminCreateEmployee);
 router.get("/", authorize("admin"), getAllEmployees);
 router.get("/:employeeId", getEmployeeById);
 router.patch("/:employeeId/verify", authorize("admin"), verifyEmployee);

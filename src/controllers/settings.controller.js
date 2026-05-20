@@ -4,13 +4,17 @@ import ApiResponse from "../utils/ApiResponse.js";
 const COD_KEY = "codBooking";
 
 const DEFAULT_COD = {
-  enabled: false,
-  minOrderAmount: 5000,      // only trigger if order >= this
-  bookingType: "flat",       // "flat" | "percent"
-  bookingValue: 500,         // Rs. amount or %
-  upiId: "",                 // e.g. "shop@upi"
-  upiName: "",               // display name
-  nonRefundable: true,
+  // Global order limits (all payment methods)
+  minOrderAmount: 0,       // any order below this is blocked (0 = no minimum)
+  maxOrderAmount: 0,       // any order above this is blocked (0 = no maximum)
+
+  // COD availability
+  codEnabled: true,        // when false, COD option hidden at checkout
+
+  // COD booking (non-refundable, collected via Razorpay before order)
+  bookingEnabled: false,
+  bookingType: "flat",     // "flat" | "percent"
+  bookingValue: 500,
 };
 
 export const getCodSettings = async (req, res, next) => {

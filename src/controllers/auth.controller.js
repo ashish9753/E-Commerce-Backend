@@ -16,13 +16,12 @@ export const register = async (req, res, next) => {
     const existingUser = await User.findOne({ email });
     if (existingUser) throw new ApiError(409, "Email already registered");
 
-    const allowedRoles = ["user", "employee"];
     const user = await User.create({
       name,
       email,
       phone,
       password,
-      role: allowedRoles.includes(role) ? role : "user",
+      role: "user",
     });
 
     const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);

@@ -62,6 +62,8 @@ export const placeOrder = async (req, res, next) => {
     // Build order items with current prices
     const orderItems = [];
     let itemsPrice = 0;
+    let taxPrice = 0;
+    const taxLabelsSet = new Set();
 
     for (const item of rawItems) {
       const productId = item.product._id || item.product;
@@ -72,7 +74,11 @@ export const placeOrder = async (req, res, next) => {
       }
 
       const price = product.discountPrice || product.price;
-      itemsPrice += price * item.quantity;
+      const itemTotal = price * item.quantity;
+      const rate = (product.taxRate ?? TAX_RATE * 100) / 100; // convert % to decimal
+      itemsPrice += itemTotal;
+      taxPrice   += itemTotal * rate;
+      if (product.taxLabel) taxLabelsSet.add(product.taxLabel);
       orderItems.push({
         product: product._id,
         title: product.title,
@@ -82,9 +88,12 @@ export const placeOrder = async (req, res, next) => {
       });
     }
 
+    taxPrice = parseFloat(taxPrice.toFixed(2));
+    // Derive a readable tax label (e.g. "GST" or "GST / IGST" for mixed)
+    const taxLabel = taxLabelsSet.size > 0 ? [...taxLabelsSet].join(" / ") : "GST";
+
     // Price calculations
     const shippingPrice = itemsPrice >= SHIPPING_THRESHOLD ? 0 : SHIPPING_PRICE;
-    const taxPrice = parseFloat((itemsPrice * TAX_RATE).toFixed(2));
 
     // Coupon discount (from cart)
     let discountAmount = 0;
@@ -106,18 +115,35 @@ export const placeOrder = async (req, res, next) => {
 
     const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
 
-    // COD booking amount
+    // Order limits + COD eligibility + booking
     let codBookingAmount = 0;
     let codBookingStatus = "NOT_REQUIRED";
-    if (paymentMethod === "COD") {
+    {
       const Settings = (await import("../models/settings.model.js")).default;
       const settingsDoc = await Settings.findOne({ key: "codBooking" });
-      const cfg = settingsDoc?.value;
-      if (cfg?.enabled && totalPrice >= (cfg.minOrderAmount || 0)) {
-        codBookingAmount = cfg.bookingType === "percent"
-          ? parseFloat(((totalPrice * cfg.bookingValue) / 100).toFixed(2))
-          : cfg.bookingValue;
-        codBookingStatus = codBookingUtr ? "PAID" : "PENDING";
+      const cfg = settingsDoc?.value ?? {};
+
+      // COD-specific checks (min/max apply to COD only)
+      if (paymentMethod === "COD") {
+        const minAmt = cfg.minOrderAmount || 0;
+        const maxAmt = cfg.maxOrderAmount || 0;
+        if (minAmt > 0 && totalPrice < minAmt) {
+          throw new ApiError(400, `COD requires a minimum order of Rs. ${minAmt}.`);
+        }
+        if (maxAmt > 0 && totalPrice > maxAmt) {
+          throw new ApiError(400, `COD is not available for orders above Rs. ${maxAmt}.`);
+        }
+        // support both old `enabled` field and new `codEnabled` field
+        const codEnabled = cfg.codEnabled ?? cfg.enabled ?? true;
+        if (codEnabled === false) {
+          throw new ApiError(400, "Cash on Delivery is currently unavailable.");
+        }
+        if (cfg.bookingEnabled) {
+          codBookingAmount = cfg.bookingType === "percent"
+            ? parseFloat(((totalPrice * cfg.bookingValue) / 100).toFixed(2))
+            : cfg.bookingValue;
+          codBookingStatus = codBookingUtr ? "PAID" : "PENDING";
+        }
       }
     }
 
@@ -129,6 +155,7 @@ export const placeOrder = async (req, res, next) => {
       itemsPrice,
       shippingPrice,
       taxPrice,
+      taxLabel,
       discountAmount,
       totalPrice,
       couponId: couponId?.toString() || null,
@@ -423,20 +450,38 @@ export const getEmployeeOrders = async (req, res, next) => {
       Order.countDocuments(filter),
     ]);
 
-    // Revenue = full order totalPrice for all paid orders containing employee's products
-    const revenueAgg = await Order.aggregate([
-      { $match: { "orderItems.product": { $in: productIds }, paymentStatus: "PAID" } },
-      { $group: { _id: null, total: { $sum: "$totalPrice" } } },
+    const RETURNED_STATUSES = ["RETURNED", "CANCELLED"];
+
+    // Revenue = paid orders that have NOT been returned/cancelled
+    const [revenueAgg, refundedAgg, statusAgg] = await Promise.all([
+      Order.aggregate([
+        { $match: { "orderItems.product": { $in: productIds }, paymentStatus: "PAID", orderStatus: { $nin: RETURNED_STATUSES } } },
+        { $group: { _id: null, total: { $sum: "$totalPrice" } } },
+      ]),
+      // Refunded: explicitly refunded OR paid-then-returned/cancelled
+      Order.aggregate([
+        { $match: { "orderItems.product": { $in: productIds }, $or: [
+          { paymentStatus: "REFUNDED" },
+          { paymentStatus: "PAID", orderStatus: { $in: RETURNED_STATUSES } },
+        ]}},
+        { $group: { _id: null, total: { $sum: "$refundAmount" }, orderTotal: { $sum: "$totalPrice" } } },
+      ]),
+      Order.aggregate([
+        { $match: { "orderItems.product": { $in: productIds } } },
+        { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
+      ]),
     ]);
 
-    const statusAgg = await Order.aggregate([
-      { $match: { "orderItems.product": { $in: productIds } } },
-      { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
-    ]);
+    const employeeRevenue = revenueAgg[0]?.total || 0;
+    const refundedRaw = refundedAgg[0];
+    const employeeRefunded = refundedRaw
+      ? (refundedRaw.total > 0 ? refundedRaw.total : refundedRaw.orderTotal)
+      : 0;
 
     res.json(new ApiResponse(200, {
       ...buildPaginatedResponse(orders, total, page, limit),
-      employeeRevenue: revenueAgg[0]?.total || 0,
+      employeeRevenue,
+      employeeRefunded,
       statusBreakdown: statusAgg,
     }));
   } catch (err) {
@@ -459,6 +504,12 @@ export const adminForceRefund = async (req, res, next) => {
     const existing = await ReturnRequest.findOne({ order: order._id });
     if (existing) throw new ApiError(409, "A return/refund request already exists for this order");
 
+    // Non-refundable COD booking amount is excluded from the refund
+    const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
+      ? order.codBookingAmount : 0;
+    const defaultRefundable = order.totalPrice - nonRefundable;
+    const finalRefundAmount = refundAmount !== undefined ? Number(refundAmount) : defaultRefundable;
+
     const ret = await ReturnRequest.create({
       order:       order._id,
       user:        order.user._id,
@@ -466,7 +517,7 @@ export const adminForceRefund = async (req, res, next) => {
       reason,
       description: adminNote || "Admin override refund",
       resolution:  "refund",
-      refundAmount: refundAmount || order.totalPrice,
+      refundAmount: finalRefundAmount,
       adminNote,
       status:      "APPROVED",
       timeline: [
@@ -476,10 +527,11 @@ export const adminForceRefund = async (req, res, next) => {
     });
 
     order.orderStatus = "RETURNED";
+    order.paymentStatus = "REFUNDED";
     order.statusHistory.push({ status: "RETURNED", note: `Admin force-refund: ${adminNote || reason}`, timestamp: new Date() });
     await order.save();
 
-    await notify({ userId: order.user._id, title: "Refund Initiated ↩️", message: `Your order ${order.orderNumber} has been approved for a refund of ₹${refundAmount || order.totalPrice}.`, type: "ORDER", link: `/track?id=${order._id}` });
+    await notify({ userId: order.user._id, title: "Refund Initiated ↩️", message: `Your order ${order.orderNumber} has been approved for a refund of ₹${finalRefundAmount}.`, type: "ORDER", link: `/track?id=${order._id}` });
 
     res.json(new ApiResponse(200, { returnRequest: ret }, "Force refund initiated"));
   } catch (err) {
@@ -489,21 +541,44 @@ export const adminForceRefund = async (req, res, next) => {
 
 export const getOrderStats = async (req, res, next) => {
   try {
-    const [totalOrders, revenue, statusBreakdown] = await Promise.all([
+    const RETURNED_STATUSES = ["RETURNED", "CANCELLED"];
+
+    const [totalOrders, revenue, refunded, statusBreakdown, paymentBreakdown] = await Promise.all([
       Order.countDocuments(),
+      // Net revenue: paid orders that have NOT been returned/cancelled
       Order.aggregate([
-        { $match: { paymentStatus: "PAID" } },
+        { $match: { paymentStatus: "PAID", orderStatus: { $nin: RETURNED_STATUSES } } },
         { $group: { _id: null, total: { $sum: "$totalPrice" } } },
+      ]),
+      // Refunded: explicitly refunded OR paid-then-returned/cancelled
+      Order.aggregate([
+        { $match: { $or: [
+          { paymentStatus: "REFUNDED" },
+          { paymentStatus: "PAID", orderStatus: { $in: RETURNED_STATUSES } },
+        ]}},
+        { $group: { _id: null, total: { $sum: "$refundAmount" }, orderTotal: { $sum: "$totalPrice" } } },
       ]),
       Order.aggregate([
         { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
       ]),
+      Order.aggregate([
+        { $group: { _id: "$paymentMethod", count: { $sum: 1 } } },
+      ]),
     ]);
+
+    const netRevenue = revenue[0]?.total || 0;
+    // Use refundAmount when set, otherwise fall back to orderTotal (for RETURNED orders with no explicit refundAmount yet)
+    const refundedAmount = refunded[0]
+      ? (refunded[0].total > 0 ? refunded[0].total : refunded[0].orderTotal)
+      : 0;
 
     res.json(new ApiResponse(200, {
       totalOrders,
-      totalRevenue: revenue[0]?.total || 0,
+      netRevenue,
+      refundedAmount,
+      totalRevenue: netRevenue + refundedAmount,
       statusBreakdown,
+      paymentBreakdown,
     }));
   } catch (err) {
     next(err);

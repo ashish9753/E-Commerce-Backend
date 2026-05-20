@@ -24,6 +24,8 @@ const productSchema = new mongoose.Schema(
     isDeleted:     { type: Boolean, default: false },
     returnable:    { type: Boolean, default: true },
     returnWindow:  { type: Number, enum: [7, 10], default: 7 },
+    taxRate:       { type: Number, default: 18, min: 0, max: 100 },  // % e.g. 18 for GST 18%
+    taxLabel:      { type: String, default: "GST" },                  // shown on invoice
   },
   { timestamps: true }
 );

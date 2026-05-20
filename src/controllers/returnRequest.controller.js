@@ -51,6 +51,11 @@ export const createReturnRequest = async (req, res, next) => {
     const isCOD = order.paymentMethod === "COD";
     const defaultRefundMethod = isCOD ? "bank_transfer" : "original_payment";
 
+    // Deduct non-refundable COD booking amount if it was paid
+    const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
+      ? order.codBookingAmount : 0;
+    const refundableAmount = order.totalPrice - nonRefundable;
+
     const returnReq = await ReturnRequest.create({
       order:        orderId,
       user:         req.user._id,
@@ -59,7 +64,7 @@ export const createReturnRequest = async (req, res, next) => {
       reason,
       description,
       resolution:   resolution || "refund",
-      refundAmount: order.totalPrice,
+      refundAmount: refundableAmount,
       refundMethod: defaultRefundMethod,
       timeline: [{ status: "REQUESTED", note: "Return request submitted by customer", by: "system" }],
     });
@@ -341,7 +346,7 @@ export const getAllReturnRequests = async (req, res, next) => {
       ReturnRequest.find(filter)
         .populate("user",    "name email")
         .populate("product", "title images")
-        .populate("order",   "orderNumber totalPrice orderItems createdAt")
+        .populate("order",   "orderNumber totalPrice orderItems createdAt paymentMethod paymentStatus codBookingAmount codBookingStatus")
         .skip(skip).limit(limit).sort({ createdAt: -1 }),
       ReturnRequest.countDocuments(filter),
     ]);
