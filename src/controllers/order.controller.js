@@ -9,6 +9,7 @@ import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { autoRefund } from "../utils/refund.utils.js";
 
 const ORDER_STATUS_MESSAGES = {
   CONFIRMED:        { title: "Order Confirmed ✅",          message: "Your order has been confirmed and is being prepared." },
@@ -258,6 +259,22 @@ export const cancelOrder = async (req, res, next) => {
 
     await order.save();
 
+    // Auto Razorpay refund for online-paid orders
+    let refundResult = null;
+    if (order.paymentStatus === "PAID" && order.paymentMethod === "ONLINE") {
+      refundResult = await autoRefund(
+        order._id,
+        order.totalPrice,
+        `Order #${order.orderNumber} cancelled`
+      );
+      if (refundResult.success) {
+        await Order.findByIdAndUpdate(order._id, {
+          refundStatus: "COMPLETED",
+          refundAmount: refundResult.refundAmount,
+        });
+      }
+    }
+
     // Restore stock
     const employeeIds = new Set();
     for (const item of order.orderItems) {
@@ -269,11 +286,23 @@ export const cancelOrder = async (req, res, next) => {
       if (product?.employee) employeeIds.add(product.employee.toString());
     }
 
+    // Build refund message for customer notification
+    let refundMsg = "";
+    if (order.paymentStatus === "PAID") {
+      if (refundResult?.success) {
+        refundMsg = ` ₹${refundResult.refundAmount} has been refunded to your original payment method.`;
+      } else if (order.paymentMethod === "ONLINE") {
+        refundMsg = ` Refund could not be processed automatically — our team will reach out.`;
+      } else {
+        refundMsg = ` A refund will be processed to your bank account shortly.`;
+      }
+    }
+
     // Notify customer
     await notify({
       userId:  order.user,
       title:   "Order Cancelled ❌",
-      message: `Your order #${order.orderNumber} has been cancelled.${reason ? " Reason: " + reason : ""} ${order.paymentStatus === "PAID" ? "A refund will be processed shortly." : ""}`,
+      message: `Your order #${order.orderNumber} has been cancelled.${reason ? " Reason: " + reason : ""}${refundMsg}`,
       type:    "ORDER",
       link:    `/orders`,
     });

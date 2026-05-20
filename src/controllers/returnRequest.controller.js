@@ -8,6 +8,7 @@ import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { autoRefund } from "../utils/refund.utils.js";
 
 const pushTimeline = (doc, status, note, by = "system") => {
   doc.timeline.push({ status, note, by, at: new Date() });
@@ -377,9 +378,8 @@ export const processReturnRequest = async (req, res, next) => {
       returnReq.resolvedAt = new Date();
     }
     pushTimeline(returnReq, status, adminNote || `Admin updated status to ${status}`, "admin");
-    await returnReq.save();
 
-    // Restore stock on APPROVED
+    // ── Restore stock on APPROVED or ITEM_RECEIVED ──
     if (status === "APPROVED" || status === "ITEM_RECEIVED") {
       await Order.findByIdAndUpdate(returnReq.order._id, {
         refundStatus: "PROCESSING",
@@ -394,45 +394,88 @@ export const processReturnRequest = async (req, res, next) => {
         );
         if (product) {
           await InventoryLog.create({
-            product:        item.product,
-            order:          returnReq.order._id,
-            changeType:     "RETURN",
+            product:         item.product,
+            order:           returnReq.order._id,
+            changeType:      "RETURN",
             quantityChanged: item.quantity,
-            oldStock:       product.stock - item.quantity,
-            newStock:       product.stock,
-            note:           `Return approved for order ${returnReq.order.orderNumber}`,
-            performedBy:    req.user._id,
+            oldStock:        product.stock - item.quantity,
+            newStock:        product.stock,
+            note:            `Return approved for order ${returnReq.order.orderNumber}`,
+            performedBy:     req.user._id,
           });
         }
       }
     }
 
-    if (["REFUND_COMPLETED", "REPLACEMENT_SENT", "COMPLETED"].includes(status)) {
+    // ── AUTO RAZORPAY REFUND when admin sets REFUND_INITIATED (online orders only) ──
+    let autoRefundResult = null;
+    if (status === "REFUND_INITIATED" && returnReq.order?.paymentMethod === "ONLINE") {
+      autoRefundResult = await autoRefund(
+        returnReq.order._id,
+        returnReq.refundAmount || returnReq.order.totalPrice,
+        `Return #${returnReq._id} — ${returnReq.reason}`
+      );
+
+      if (autoRefundResult.success) {
+        // Auto-advance to REFUND_COMPLETED since Razorpay accepted it
+        returnReq.status      = "REFUND_COMPLETED";
+        returnReq.resolvedAt  = new Date();
+        pushTimeline(
+          returnReq,
+          "REFUND_COMPLETED",
+          `Auto-refunded ₹${autoRefundResult.refundAmount} via Razorpay (ID: ${autoRefundResult.refundId})`,
+          "system"
+        );
+        await Order.findByIdAndUpdate(returnReq.order._id, { refundStatus: "COMPLETED" });
+      } else {
+        // Razorpay failed — keep status as REFUND_INITIATED, admin must retry or do manual
+        pushTimeline(
+          returnReq,
+          "REFUND_INITIATED",
+          `Auto-refund failed: ${autoRefundResult.error}. Manual action required.`,
+          "system"
+        );
+        await Order.findByIdAndUpdate(returnReq.order._id, {
+          refundStatus: "PROCESSING",
+          refundAmount: returnReq.refundAmount,
+        });
+      }
+    }
+
+    if (["REFUND_COMPLETED", "REPLACEMENT_SENT", "COMPLETED"].includes(returnReq.status)) {
       await Order.findByIdAndUpdate(returnReq.order._id, { refundStatus: "COMPLETED" });
     }
 
-    const adminStatusMessages = {
-      APPROVED:          { title: "Return Approved ✅",       message: "Your return request has been approved by admin. The employee will arrange pickup." },
-      REJECTED:          { title: "Return Rejected ❌",       message: "Your return request has been rejected by admin." },
-      PICKUP_SCHEDULED:  { title: "Pickup Scheduled 🚚",      message: "Your return pickup has been scheduled." },
-      ITEM_RECEIVED:     { title: "Item Received 📬",          message: "Your returned item has been received. Refund is being processed." },
-      REFUND_INITIATED:  { title: "Refund Initiated 💸",       message: "Your refund has been initiated. It may take 3-7 business days." },
-      REFUND_COMPLETED:  { title: "Refund Completed! 🎉",      message: "Your refund is complete! The amount will reflect shortly." },
-      REPLACEMENT_SENT:  { title: "Replacement Shipped 📦",    message: "Your replacement item has been shipped." },
-      COMPLETED:         { title: "Return Completed ✅",       message: "Your return/refund case has been fully resolved." },
-    };
-    const am = adminStatusMessages[status];
+    await returnReq.save();
 
-    // Notify customer
+    // ── Customer notification messages ──
+    const finalStatus = returnReq.status;
+    const adminStatusMessages = {
+      APPROVED:         { title: "Return Approved ✅",    message: "Your return request has been approved. The employee will arrange pickup." },
+      REJECTED:         { title: "Return Rejected ❌",    message: "Your return request has been rejected by admin." },
+      PICKUP_SCHEDULED: { title: "Pickup Scheduled 🚚",   message: "Your return pickup has been scheduled." },
+      ITEM_RECEIVED:    { title: "Item Received 📬",       message: "Your returned item has been received. Refund is being processed." },
+      REFUND_INITIATED: { title: "Refund Initiated 💸",    message: "Your refund has been initiated. It may take 3–7 business days to reach your account." },
+      REFUND_COMPLETED: {
+        title:   "Refund Completed! 🎉",
+        message: autoRefundResult?.success
+          ? `₹${autoRefundResult.refundAmount} has been refunded to your original payment method. It may take 5–7 business days to reflect.`
+          : "Your refund has been marked complete. Please check your account or contact support.",
+      },
+      REPLACEMENT_SENT: { title: "Replacement Shipped 📦", message: "Your replacement item has been shipped." },
+      COMPLETED:        { title: "Return Completed ✅",    message: "Your return/refund case has been fully resolved." },
+    };
+    const am = adminStatusMessages[finalStatus];
+
     await notify({
       userId:  returnReq.user,
       title:   am?.title   || "Return Update",
-      message: (am?.message || `Your return is now: ${status.replace(/_/g, " ")}.`) + (adminNote ? ` ${adminNote}` : ""),
+      message: (am?.message || `Your return is now: ${finalStatus.replace(/_/g, " ")}.`) + (adminNote ? ` ${adminNote}` : ""),
       type:    "REFUND",
       link:    `/return-status/${returnReq._id}`,
     });
 
-    // Notify employee on admin approval/rejection
+    // ── Notify employee on approval/rejection ──
     if (returnReq.employee) {
       const employeeMsg = {
         APPROVED: "Admin has approved a return request for your product. Please arrange pickup.",
@@ -448,7 +491,19 @@ export const processReturnRequest = async (req, res, next) => {
       }
     }
 
-    res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return updated to ${status}`));
+    // Build response — include refund outcome so admin UI can show it
+    const responseData = { returnRequest: returnReq };
+    if (autoRefundResult) {
+      responseData.autoRefund = autoRefundResult;
+    }
+
+    res.json(new ApiResponse(
+      200,
+      responseData,
+      autoRefundResult?.success
+        ? `Return updated — ₹${autoRefundResult.refundAmount} auto-refunded via Razorpay`
+        : `Return updated to ${finalStatus}`
+    ));
   } catch (err) {
     next(err);
   }
