@@ -101,16 +101,12 @@ export const getProductBySlug = async (req, res, next) => {
     if (req.user) {
       await RecentlyViewed.findOneAndUpdate(
         { user: req.user._id },
-        {
-          $pull: { products: { product: product._id } },
-        },
+        { $pull: { products: { product: product._id } } },
         { upsert: true }
       );
       await RecentlyViewed.findOneAndUpdate(
         { user: req.user._id },
-        {
-          $push: { products: { $each: [{ product: product._id }], $position: 0, $slice: 20 } },
-        }
+        { $push: { products: { $each: [{ product: product._id }], $position: 0, $slice: 20 } } }
       );
     }
 
