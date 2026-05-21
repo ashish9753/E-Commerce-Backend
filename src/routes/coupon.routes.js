@@ -10,7 +10,7 @@ const router = Router();
 
 router.post("/validate", protect, validateCoupon);
 
-router.use(protect, authorize("admin"));
+router.use(protect, authorize("admin", "employee"));
 router.get("/", getAllCoupons);
 router.post("/", createCoupon);
 router.get("/:couponId", getCouponById);
