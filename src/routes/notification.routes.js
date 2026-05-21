@@ -2,7 +2,7 @@ import { Router } from "express";
 import {
   getMyNotifications, markAsRead, markAllAsRead,
   deleteNotification, sendBroadcastNotification,
-  streamNotifications,
+  streamNotifications, spendPreview,
 } from "../controllers/notification.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
@@ -17,6 +17,7 @@ router.use(protect);
 router.get("/", getMyNotifications);
 // static routes before parameterized
 router.patch("/read-all", markAllAsRead);
+router.get("/spend-preview", authorize("admin"), spendPreview);
 router.post("/broadcast", authorize("admin"), sendBroadcastNotification);
 // parameterized routes last
 router.patch("/:notificationId/read", markAsRead);

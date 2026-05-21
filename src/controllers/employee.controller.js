@@ -82,6 +82,43 @@ export const adminCreateEmployee = async (req, res, next) => {
   }
 };
 
+export const adminRegisterExistingUser = async (req, res, next) => {
+  try {
+    const { userId, shopName, gstNumber, businessAddress, shopDescription } = req.body;
+    if (!userId || !shopName)
+      throw new ApiError(400, "userId and shopName are required");
+
+    const user = await User.findById(userId);
+    if (!user) throw new ApiError(404, "User not found");
+
+    const existing = await Employee.findOne({ user: userId });
+    if (existing) throw new ApiError(409, "This user already has an employee profile");
+
+    await User.findByIdAndUpdate(userId, { role: "employee" });
+
+    const employee = await Employee.create({
+      user: userId,
+      shopName,
+      gstNumber,
+      businessAddress,
+      shopDescription,
+      isVerified: true,
+    });
+
+    await notify({
+      userId,
+      title:   "Welcome to the Team! 🏪",
+      message: `Your employee account for "${shopName}" has been set up by admin. You can now access the Employee Panel.`,
+      type:    "SYSTEM",
+    });
+
+    const populated = await Employee.findById(employee._id).populate("user", "name email phone");
+    res.status(201).json(new ApiResponse(201, { employee: populated }, "Existing user registered as employee"));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const getMyEmployeeProfile = async (req, res, next) => {
   try {
     const employee = await Employee.findOne({ user: req.user._id }).populate("user", "name email phone");

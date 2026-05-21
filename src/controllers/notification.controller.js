@@ -1,5 +1,6 @@
 import Notification from "../models/notification.model.js";
 import User from "../models/user.model.js";
+import Order from "../models/order.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
@@ -87,9 +88,40 @@ export const deleteNotification = async (req, res, next) => {
   }
 };
 
+// Helper: aggregate order spend and return user ObjectIds matching the range
+async function getUserIdsBySpend(minSpend, maxSpend) {
+  const spendMatch = {};
+  if (minSpend != null) spendMatch.$gte = Number(minSpend);
+  if (maxSpend  != null) spendMatch.$lte = Number(maxSpend);
+
+  const pipeline = [
+    { $match: { orderStatus: { $nin: ["CANCELLED", "RETURNED"] } } },
+    { $group: { _id: "$user", totalSpend: { $sum: "$totalPrice" } } },
+    { $match: { totalSpend: spendMatch } },
+  ];
+  const rows = await Order.aggregate(pipeline);
+  const userIds = rows.map((r) => r._id);
+
+  // Only target customers (role: user)
+  const validUsers = await User.find({ _id: { $in: userIds }, role: "user" }).select("_id");
+  return validUsers.map((u) => u._id);
+}
+
+export const spendPreview = async (req, res, next) => {
+  try {
+    const { minSpend, maxSpend } = req.query;
+    if (minSpend == null && maxSpend == null)
+      throw new ApiError(400, "Provide at least minSpend or maxSpend");
+    const ids = await getUserIdsBySpend(minSpend ?? null, maxSpend ?? null);
+    res.json(new ApiResponse(200, { count: ids.length }));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const sendBroadcastNotification = async (req, res, next) => {
   try {
-    const { userIds, targetRole, userEmail, title, message, type, link, couponCode } = req.body;
+    const { userIds, targetRole, userEmail, minSpend, maxSpend, title, message, type, link, couponCode } = req.body;
     if (!title || !message || !type) {
       throw new ApiError(400, "title, message, and type are required");
     }
@@ -101,6 +133,9 @@ export const sendBroadcastNotification = async (req, res, next) => {
       const found = await User.findOne({ email: userEmail.toLowerCase().trim() }).select("_id");
       if (!found) throw new ApiError(404, `No user found with email: ${userEmail}`);
       recipientIds = [found._id];
+    } else if (minSpend != null || maxSpend != null) {
+      // Spend-based targeting
+      recipientIds = await getUserIdsBySpend(minSpend ?? null, maxSpend ?? null);
     } else if (targetRole && targetRole !== "specific") {
       const roleFilter = targetRole === "all" ? {} : { role: targetRole };
       const users = await User.find(roleFilter).select("_id");
@@ -108,7 +143,7 @@ export const sendBroadcastNotification = async (req, res, next) => {
     } else if (userIds?.length) {
       recipientIds = userIds;
     } else {
-      throw new ApiError(400, "Provide targetRole, userEmail, or userIds");
+      throw new ApiError(400, "Provide targetRole, userEmail, minSpend/maxSpend, or userIds");
     }
 
     if (!recipientIds.length) {
