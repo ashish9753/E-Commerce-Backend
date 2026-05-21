@@ -157,6 +157,16 @@ export const getAllUsers = async (req, res, next) => {
   }
 };
 
+export const getUserById = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) throw new ApiError(404, "User not found");
+    res.json(new ApiResponse(200, { user }));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const toggleBlockUser = async (req, res, next) => {
   try {
     const { userId } = req.params;

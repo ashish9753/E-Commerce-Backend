@@ -337,6 +337,7 @@ export const getAllOrders = async (req, res, next) => {
     const filter = {};
     if (req.query.status) filter.orderStatus = req.query.status;
     if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus;
+    if (req.query.userId) filter.user = req.query.userId;
 
     const [orders, total] = await Promise.all([
       Order.find(filter)

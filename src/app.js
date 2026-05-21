@@ -20,7 +20,7 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 500,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: "Too many requests, please try again later." },

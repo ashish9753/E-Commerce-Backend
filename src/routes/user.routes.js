@@ -3,7 +3,7 @@ import {
   getProfile, updateProfile, uploadProfileImage, changePassword,
   addAddress, updateAddress, deleteAddress,
   getWishlist, toggleWishlist,
-  getAllUsers, toggleBlockUser, deleteUser,
+  getAllUsers, getUserById, toggleBlockUser, deleteUser,
 } from "../controllers/user.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
@@ -27,6 +27,7 @@ router.patch("/wishlist/:productId", toggleWishlist);
 
 // Admin only
 router.get("/", authorize("admin"), getAllUsers);
+router.get("/:userId", authorize("admin"), getUserById);
 router.patch("/:userId/block", authorize("admin"), toggleBlockUser);
 router.delete("/:userId", authorize("admin"), deleteUser);
 
