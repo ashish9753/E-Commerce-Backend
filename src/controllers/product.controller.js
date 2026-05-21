@@ -92,7 +92,7 @@ export const getProducts = async (req, res, next) => {
 
 export const getProductBySlug = async (req, res, next) => {
   try {
-    const product = await Product.findOne({ slug: req.params.slug, isDeleted: false })
+    const product = await Product.findOne({ slug: req.params.slug, isDeleted: false, isPublished: true })
       .populate("category", "name slug")
       .populate("employee", "shopName shopLogo rating");
 
@@ -118,7 +118,7 @@ export const getProductBySlug = async (req, res, next) => {
 
 export const getProductById = async (req, res, next) => {
   try {
-    const product = await Product.findOne({ _id: req.params.productId, isDeleted: false })
+    const product = await Product.findOne({ _id: req.params.productId, isDeleted: false, isPublished: true })
       .populate("category", "name slug")
       .populate("employee", "shopName shopLogo rating");
     if (!product) throw new ApiError(404, "Product not found");
@@ -136,7 +136,17 @@ export const updateProduct = async (req, res, next) => {
     const product = await Product.findOne({ _id: req.params.productId, employee: employee._id, isDeleted: false });
     if (!product) throw new ApiError(404, "Product not found or you don't own it");
 
-    const updates = { ...req.body };
+    // Whitelist updatable fields — prevents tampering with employee, sold, rating, isDeleted, etc.
+    const ALLOWED = [
+      "title", "description", "shortDescription", "category", "brand", "sku",
+      "price", "discountPrice", "stock", "tags", "specifications",
+      "isFeatured", "isPublished", "returnable", "returnWindow", "taxRate", "taxLabel",
+      "keepImages",
+    ];
+    const updates = {};
+    for (const k of ALLOWED) {
+      if (req.body[k] !== undefined) updates[k] = req.body[k];
+    }
     if (updates.title) updates.slug = await generateUniqueSlug(updates.title, Product, product._id);
     if (updates.price) updates.price = parseFloat(updates.price);
     if (updates.discountPrice) updates.discountPrice = parseFloat(updates.discountPrice);

@@ -194,6 +194,18 @@ export const processOrderJob = async (job) => {
     if (session) {
       await session.abortTransaction();
       session.endSession();
+    } else if (decremented.length > 0) {
+      // No-transaction mode (dev / standalone Mongo) — manually roll back stock changes
+      try {
+        await Product.bulkWrite(
+          decremented.map(({ product, quantity }) => ({
+            updateOne: {
+              filter: { _id: product._id },
+              update: { $inc: { stock: quantity, sold: -quantity } },
+            },
+          }))
+        );
+      } catch { /* best-effort */ }
     }
     throw err;
   }

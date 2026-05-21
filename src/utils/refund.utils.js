@@ -44,7 +44,14 @@ export async function autoRefund(orderId, amount, reason = "refund") {
     return { success: false, error: "No Razorpay payment ID on record" };
   }
 
-  const amountPaise = Math.round((amount ?? payment.amount) * 100);
+  // Validate + cap refund amount to what was actually paid
+  let requested = amount === undefined || amount === null ? payment.amount : Number(amount);
+  if (!Number.isFinite(requested) || requested <= 0) {
+    return { success: false, error: "Invalid refund amount" };
+  }
+  if (requested > payment.amount) requested = payment.amount;
+
+  const amountPaise = Math.round(requested * 100);
 
   try {
     const refund = await rz.payments.refund(payment.razorpayPaymentId, {

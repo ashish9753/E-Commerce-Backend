@@ -34,6 +34,14 @@ export const createReturnRequest = async (req, res, next) => {
     const existing = await ReturnRequest.findOne({ order: orderId, user: req.user._id });
     if (existing) throw new ApiError(409, "Return request already submitted for this order");
 
+    // If productId provided, ensure it actually belongs to this order
+    if (productId) {
+      const orderProductIds = order.orderItems.map(i => i.product?.toString());
+      if (!orderProductIds.includes(productId.toString())) {
+        throw new ApiError(400, "Product is not part of this order");
+      }
+    }
+
     // Find which employee owns the product — fall back to first item in order if no productId given
     let employeeId = null;
     const lookupId = productId || order.orderItems?.[0]?.product;
@@ -395,7 +403,18 @@ export const processReturnRequest = async (req, res, next) => {
 
     returnReq.status    = status;
     returnReq.adminNote = adminNote;
-    if (refundAmount) returnReq.refundAmount = parseFloat(refundAmount);
+    if (refundAmount !== undefined) {
+      const amt = Number(refundAmount);
+      if (!Number.isFinite(amt) || amt < 0) {
+        throw new ApiError(400, "Invalid refund amount");
+      }
+      // Cap to order's refundable amount (excluding non-refundable COD booking)
+      const orderTotal = returnReq.order?.totalPrice || 0;
+      const nonRefundable = (returnReq.order?.codBookingStatus === "PAID" && returnReq.order?.codBookingAmount > 0)
+        ? returnReq.order.codBookingAmount : 0;
+      const maxRefundable = Math.max(0, orderTotal - nonRefundable);
+      returnReq.refundAmount = Math.min(amt, maxRefundable);
+    }
     if (["REFUND_COMPLETED", "REPLACEMENT_SENT", "COMPLETED", "REJECTED"].includes(status)) {
       returnReq.resolvedAt = new Date();
     }

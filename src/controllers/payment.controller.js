@@ -21,11 +21,13 @@ const getRazorpay = () => {
 
 export const createBookingOrder = async (req, res, next) => {
   try {
-    const { amount } = req.body;
-    if (!amount || amount <= 0) throw new ApiError(400, "Invalid booking amount");
+    const amt = Number(req.body?.amount);
+    if (!Number.isFinite(amt) || amt <= 0) throw new ApiError(400, "Invalid booking amount");
+    // Sanity cap — booking should never exceed 1 lakh; protects against malformed clients
+    if (amt > 100000) throw new ApiError(400, "Booking amount exceeds allowed limit");
 
     const razorpayOrder = await getRazorpay().orders.create({
-      amount: Math.round(amount * 100),
+      amount: Math.round(amt * 100),
       currency: "INR",
       receipt: `bkg_${Date.now().toString().slice(-10)}`,
       notes: { type: "cod_booking", userId: req.user._id.toString() },
@@ -83,14 +85,22 @@ export const createRazorpayOrder = async (req, res, next) => {
 
 export const verifyRazorpayPayment = async (req, res, next) => {
   try {
-    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, orderId } = req.body;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      throw new ApiError(400, "Missing payment verification parameters");
+    }
 
-    const expectedSignature = crypto
+    // Constant-time HMAC compare to avoid timing attacks
+    const expected = crypto
       .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest("hex");
+    const expectedBuf = Buffer.from(expected, "hex");
+    const givenBuf = Buffer.from(razorpay_signature || "", "hex");
+    const signatureOk = expectedBuf.length === givenBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, givenBuf);
 
-    if (expectedSignature !== razorpay_signature) {
+    if (!signatureOk) {
       await Payment.findOneAndUpdate(
         { razorpayOrderId: razorpay_order_id },
         { paymentStatus: "FAILED", failureReason: "Signature mismatch" }
@@ -98,24 +108,34 @@ export const verifyRazorpayPayment = async (req, res, next) => {
       throw new ApiError(400, "Payment verification failed");
     }
 
-    const [payment, order] = await Promise.all([
-      Payment.findOneAndUpdate(
-        { razorpayOrderId: razorpay_order_id },
-        {
-          razorpayPaymentId: razorpay_payment_id,
-          razorpaySignature: razorpay_signature,
-          transactionId: razorpay_payment_id,
-          paymentStatus: "SUCCESS",
-          paidAt: new Date(),
-        },
-        { new: true }
-      ),
-      Order.findByIdAndUpdate(
-        orderId,
-        { paymentStatus: "PAID", paidAt: new Date() },
-        { new: true }
-      ),
-    ]);
+    // Resolve order from the Payment record (server-side) rather than trusting client orderId.
+    const payment = await Payment.findOne({ razorpayOrderId: razorpay_order_id });
+    if (!payment) throw new ApiError(404, "Payment record not found");
+    if (payment.user.toString() !== req.user._id.toString()) {
+      throw new ApiError(403, "This payment does not belong to you");
+    }
+    if (payment.paymentStatus === "SUCCESS") {
+      // Idempotent — already verified
+      const existingOrder = await Order.findById(payment.order);
+      return res.json(new ApiResponse(200, { payment, order: existingOrder }, "Payment already verified"));
+    }
+
+    const order = await Order.findById(payment.order);
+    if (!order) throw new ApiError(404, "Order not found");
+    if (order.user.toString() !== req.user._id.toString()) {
+      throw new ApiError(403, "Order does not belong to you");
+    }
+
+    payment.razorpayPaymentId = razorpay_payment_id;
+    payment.razorpaySignature = razorpay_signature;
+    payment.transactionId = razorpay_payment_id;
+    payment.paymentStatus = "SUCCESS";
+    payment.paidAt = new Date();
+    await payment.save();
+
+    order.paymentStatus = "PAID";
+    order.paidAt = new Date();
+    await order.save();
 
     res.json(new ApiResponse(200, { payment, order }, "Payment verified successfully"));
   } catch (err) {
@@ -127,6 +147,9 @@ export const getPaymentByOrder = async (req, res, next) => {
   try {
     const payment = await Payment.findOne({ order: req.params.orderId });
     if (!payment) throw new ApiError(404, "Payment record not found");
+    if (req.user.role !== "admin" && payment.user.toString() !== req.user._id.toString()) {
+      throw new ApiError(403, "Access denied");
+    }
     res.json(new ApiResponse(200, { payment }));
   } catch (err) {
     next(err);
@@ -157,7 +180,15 @@ export const initiateRefund = async (req, res, next) => {
     if (payment.paymentStatus === "REFUNDED") throw new ApiError(400, "Already refunded");
     if (!payment.razorpayPaymentId) throw new ApiError(400, "No Razorpay payment ID on record — cannot initiate refund");
 
-    const amountPaise = Math.round((refundAmount || payment.amount) * 100);
+    // Cap refund amount to the original payment amount and reject negatives/NaN
+    const requested = refundAmount === undefined ? payment.amount : Number(refundAmount);
+    if (!Number.isFinite(requested) || requested <= 0) {
+      throw new ApiError(400, "Invalid refund amount");
+    }
+    if (requested > payment.amount) {
+      throw new ApiError(400, `Refund amount (₹${requested}) exceeds original payment (₹${payment.amount})`);
+    }
+    const amountPaise = Math.round(requested * 100);
 
     let refund;
     try {

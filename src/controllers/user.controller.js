@@ -15,9 +15,15 @@ export const getProfile = async (req, res, next) => {
 export const updateProfile = async (req, res, next) => {
   try {
     const { name, phone } = req.body;
+    if (name && (typeof name !== "string" || name.length > 100)) {
+      throw new ApiError(400, "Invalid name");
+    }
+    if (phone && (typeof phone !== "string" || !/^[0-9+\-\s]{6,20}$/.test(phone))) {
+      throw new ApiError(400, "Invalid phone");
+    }
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { ...(name && { name }), ...(phone && { phone }) },
+      { ...(name && { name: name.trim() }), ...(phone && { phone: phone.trim() }) },
       { new: true, runValidators: true }
     );
     res.json(new ApiResponse(200, { user }, "Profile updated"));
@@ -79,10 +85,22 @@ export const addAddress = async (req, res, next) => {
 export const updateAddress = async (req, res, next) => {
   try {
     const { addressId } = req.params;
-    const updates = req.body;
+    // Whitelist allowed fields — prevents mass assignment and _id tampering
+    const ALLOWED = ["fullName", "phone", "pincode", "state", "city", "houseNo", "area", "landmark"];
+    const sanitized = {};
+    for (const k of ALLOWED) {
+      if (typeof req.body?.[k] === "string") sanitized[k] = req.body[k].trim();
+    }
+    const setObj = {};
+    for (const [k, v] of Object.entries(sanitized)) {
+      setObj[`addresses.$.${k}`] = v;
+    }
+    if (!Object.keys(setObj).length) {
+      throw new ApiError(400, "No valid fields to update");
+    }
     const user = await User.findOneAndUpdate(
       { _id: req.user._id, "addresses._id": addressId },
-      { $set: { "addresses.$": { ...updates, _id: addressId } } },
+      { $set: setObj },
       { new: true }
     );
     if (!user) throw new ApiError(404, "Address not found");

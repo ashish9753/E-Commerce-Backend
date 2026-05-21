@@ -24,6 +24,12 @@ const SHIPPING_THRESHOLD = 500;
 const SHIPPING_PRICE = 50;
 const TAX_RATE = 0.18;
 
+const VALID_ORDER_STATUSES = [
+  "PLACED", "CONFIRMED", "PACKED", "SHIPPED",
+  "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED", "RETURNED",
+];
+const VALID_PAYMENT_STATUSES = ["PENDING", "PAID", "FAILED", "REFUNDED"];
+
 /**
  * Place Order — Uses Bull queue to serialize concurrent purchase requests.
  * If 2 users click Buy at the same moment for the last item,
@@ -56,7 +62,14 @@ export const placeOrder = async (req, res, next) => {
       if (!directItem?.productId || !directItem?.quantity) {
         throw new ApiError(400, "directItem.productId and directItem.quantity required for Buy Now");
       }
-      rawItems = [{ product: directItem.productId, quantity: directItem.quantity }];
+      if (!/^[0-9a-fA-F]{24}$/.test(String(directItem.productId))) {
+        throw new ApiError(400, "Invalid productId");
+      }
+      const qty = parseInt(directItem.quantity, 10);
+      if (!Number.isFinite(qty) || qty < 1 || qty > 50) {
+        throw new ApiError(400, "Quantity must be between 1 and 50");
+      }
+      rawItems = [{ product: directItem.productId, quantity: qty }];
     }
 
     // Build order items with current prices
@@ -197,7 +210,9 @@ export const getMyOrders = async (req, res, next) => {
   try {
     const { page, limit, skip } = getPaginationData(req.query);
     const filter = { user: req.user._id };
-    if (req.query.status) filter.orderStatus = req.query.status;
+    if (req.query.status && VALID_ORDER_STATUSES.includes(req.query.status)) {
+      filter.orderStatus = req.query.status;
+    }
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
@@ -235,7 +250,7 @@ export const getOrderById = async (req, res, next) => {
 
 export const cancelOrder = async (req, res, next) => {
   try {
-    const { reason } = req.body;
+    const reasonRaw = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 500) : "";
     const order = await Order.findById(req.params.orderId);
     if (!order) throw new ApiError(404, "Order not found");
 
@@ -247,23 +262,29 @@ export const cancelOrder = async (req, res, next) => {
       throw new ApiError(400, `Cannot cancel order in '${order.orderStatus}' status`);
     }
 
+    const reason = reasonRaw || "Cancelled by user";
     order.orderStatus = "CANCELLED";
-    order.cancellationReason = reason || "Cancelled by user";
+    order.cancellationReason = reason;
     order.statusHistory.push({ status: "CANCELLED", note: reason });
 
-    if (order.paymentStatus === "PAID") {
+    // Non-refundable COD booking deposit (if any) — deducted from refund amount
+    const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
+      ? order.codBookingAmount : 0;
+    const refundable = Math.max(0, (order.totalPrice || 0) - nonRefundable);
+
+    if (order.paymentStatus === "PAID" || (order.paymentMethod === "COD" && nonRefundable > 0)) {
       order.refundStatus = "PENDING";
-      order.refundAmount = order.totalPrice;
+      order.refundAmount = refundable;
     }
 
     await order.save();
 
-    // Auto Razorpay refund for online-paid orders
+    // Auto Razorpay refund for online-paid orders (refundable portion only)
     let refundResult = null;
-    if (order.paymentStatus === "PAID" && order.paymentMethod === "ONLINE") {
+    if (order.paymentStatus === "PAID" && order.paymentMethod === "ONLINE" && refundable > 0) {
       refundResult = await autoRefund(
         order._id,
-        order.totalPrice,
+        refundable,
         `Order #${order.orderNumber} cancelled`
       );
       if (refundResult.success) {
@@ -335,9 +356,15 @@ export const getAllOrders = async (req, res, next) => {
   try {
     const { page, limit, skip } = getPaginationData(req.query);
     const filter = {};
-    if (req.query.status) filter.orderStatus = req.query.status;
-    if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus;
-    if (req.query.userId) filter.user = req.query.userId;
+    if (req.query.status && VALID_ORDER_STATUSES.includes(req.query.status)) {
+      filter.orderStatus = req.query.status;
+    }
+    if (req.query.paymentStatus && VALID_PAYMENT_STATUSES.includes(req.query.paymentStatus)) {
+      filter.paymentStatus = req.query.paymentStatus;
+    }
+    if (req.query.userId && /^[0-9a-fA-F]{24}$/.test(req.query.userId)) {
+      filter.user = req.query.userId;
+    }
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
@@ -539,8 +566,13 @@ export const adminForceRefund = async (req, res, next) => {
     // Non-refundable COD booking amount is excluded from the refund
     const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
       ? order.codBookingAmount : 0;
-    const defaultRefundable = order.totalPrice - nonRefundable;
-    const finalRefundAmount = refundAmount !== undefined ? Number(refundAmount) : defaultRefundable;
+    const defaultRefundable = Math.max(0, order.totalPrice - nonRefundable);
+    let finalRefundAmount = refundAmount !== undefined ? Number(refundAmount) : defaultRefundable;
+    if (!Number.isFinite(finalRefundAmount) || finalRefundAmount < 0) {
+      throw new ApiError(400, "Invalid refund amount");
+    }
+    // Cap to maximum refundable
+    if (finalRefundAmount > defaultRefundable) finalRefundAmount = defaultRefundable;
 
     const ret = await ReturnRequest.create({
       order:       order._id,
