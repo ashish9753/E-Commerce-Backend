@@ -8,15 +8,26 @@ export const errorHandler = (err, req, res, next) => {
   let error = err;
 
   if (!(error instanceof ApiError)) {
-    const statusCode = error.statusCode || (error.name === "CastError" ? 400 : 500);
+    let statusCode = error.statusCode || 500;
     let message = error.message || "Internal Server Error";
 
-    if (error.name === "CastError") message = `Invalid ${error.path}: ${error.value}`;
-    if (error.code === 11000) {
+    if (error.name === "MulterError") {
+      statusCode = 400;
+      const multerMessages = {
+        LIMIT_FILE_SIZE: "File is too large",
+        LIMIT_FILE_COUNT: "Too many files uploaded",
+        LIMIT_UNEXPECTED_FILE: "Unexpected file field",
+      };
+      message = multerMessages[error.code] || error.message;
+    } else if (error.name === "CastError") {
+      statusCode = 400;
+      message = `Invalid ${error.path}: ${error.value}`;
+    } else if (error.code === 11000) {
+      statusCode = 409;
       const field = Object.keys(error.keyValue)[0];
       message = `Duplicate value for field: ${field}`;
-    }
-    if (error.name === "ValidationError") {
+    } else if (error.name === "ValidationError") {
+      statusCode = 400;
       message = Object.values(error.errors).map((e) => e.message).join(", ");
     }
 

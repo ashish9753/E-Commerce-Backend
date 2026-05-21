@@ -10,7 +10,7 @@ const router = Router();
 router.get("/product/:productId", getProductReviews);
 
 router.use(protect);
-router.post("/", uploadMultiple("images", 3), createReview);
+router.post("/", uploadMultiple("images", 2), createReview);
 router.patch("/:reviewId", updateReview);
 router.delete("/:reviewId", deleteReview);
 

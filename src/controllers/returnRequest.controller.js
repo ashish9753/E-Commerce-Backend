@@ -3,12 +3,12 @@ import Order         from "../models/order.model.js";
 import Product       from "../models/product.model.js";
 import Employee      from "../models/employee.model.js";
 import InventoryLog  from "../models/inventoryLog.model.js";
-import Notification  from "../models/notification.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { autoRefund } from "../utils/refund.utils.js";
+import { uploadToCloudinary, uploadVideoToCloudinary } from "../utils/cloudinary.utils.js";
 
 const pushTimeline = (doc, status, note, by = "system") => {
   doc.timeline.push({ status, note, by, at: new Date() });
@@ -19,6 +19,13 @@ export const createReturnRequest = async (req, res, next) => {
   try {
     const { orderId, productId, reason, description, resolution } = req.body;
     if (!orderId || !reason) throw new ApiError(400, "orderId and reason are required");
+
+    const photoFiles = req.files?.photos || [];
+    const videoFiles = req.files?.video  || [];
+    if (photoFiles.length === 0) throw new ApiError(400, "At least 1 photo is required for a return request");
+    for (const f of photoFiles) {
+      if (f.size > 10 * 1024 * 1024) throw new ApiError(400, "Each photo must be under 10 MB");
+    }
 
     const order = await Order.findOne({ _id: orderId, user: req.user._id });
     if (!order) throw new ApiError(404, "Order not found");
@@ -57,6 +64,17 @@ export const createReturnRequest = async (req, res, next) => {
       ? order.codBookingAmount : 0;
     const refundableAmount = order.totalPrice - nonRefundable;
 
+    // Upload evidence to Cloudinary
+    const evidence = [];
+    for (const file of photoFiles) {
+      const result = await uploadToCloudinary(file.buffer, "returns/photos");
+      evidence.push({ url: result.secure_url, publicId: result.public_id, type: "image" });
+    }
+    for (const file of videoFiles) {
+      const result = await uploadVideoToCloudinary(file.buffer, "returns/videos");
+      evidence.push({ url: result.secure_url, publicId: result.public_id, type: "video" });
+    }
+
     const returnReq = await ReturnRequest.create({
       order:        orderId,
       user:         req.user._id,
@@ -67,6 +85,7 @@ export const createReturnRequest = async (req, res, next) => {
       resolution:   resolution || "refund",
       refundAmount: refundableAmount,
       refundMethod: defaultRefundMethod,
+      evidence,
       timeline: [{ status: "REQUESTED", note: "Return request submitted by customer", by: "system" }],
     });
 
@@ -291,11 +310,14 @@ export const employeeAdvanceReturn = async (req, res, next) => {
     if (nextStatus === "ITEM_RECEIVED") {
       const populatedOrder = await Order.findById(returnReq.order);
       if (populatedOrder) {
-        for (const item of populatedOrder.orderItems) {
-          await Product.findByIdAndUpdate(item.product, {
-            $inc: { stock: item.quantity, sold: -item.quantity },
-          });
-        }
+        await Product.bulkWrite(
+          populatedOrder.orderItems.map(item => ({
+            updateOne: {
+              filter: { _id: item.product },
+              update: { $inc: { stock: item.quantity, sold: -item.quantity } },
+            },
+          }))
+        );
         await Order.findByIdAndUpdate(returnReq.order, {
           refundStatus: "PROCESSING",
           refundAmount: returnReq.refundAmount,
@@ -386,25 +408,34 @@ export const processReturnRequest = async (req, res, next) => {
         refundAmount: returnReq.refundAmount,
       });
 
-      for (const item of returnReq.order.orderItems) {
-        const product = await Product.findByIdAndUpdate(
-          item.product,
-          { $inc: { stock: item.quantity, sold: -item.quantity } },
-          { new: true }
-        );
-        if (product) {
-          await InventoryLog.create({
+      const itemProductIds = returnReq.order.orderItems.map(i => i.product);
+      const stockBefore = await Product.find({ _id: { $in: itemProductIds } }).select("stock").lean();
+      const stockMap = Object.fromEntries(stockBefore.map(p => [p._id.toString(), p.stock]));
+
+      await Product.bulkWrite(
+        returnReq.order.orderItems.map(item => ({
+          updateOne: {
+            filter: { _id: item.product },
+            update: { $inc: { stock: item.quantity, sold: -item.quantity } },
+          },
+        }))
+      );
+
+      await InventoryLog.insertMany(
+        returnReq.order.orderItems.map(item => {
+          const old = stockMap[item.product?.toString()] ?? 0;
+          return {
             product:         item.product,
             order:           returnReq.order._id,
             changeType:      "RETURN",
             quantityChanged: item.quantity,
-            oldStock:        product.stock - item.quantity,
-            newStock:        product.stock,
+            oldStock:        old,
+            newStock:        old + item.quantity,
             note:            `Return approved for order ${returnReq.order.orderNumber}`,
             performedBy:     req.user._id,
-          });
-        }
-      }
+          };
+        })
+      );
     }
 
     // ── AUTO RAZORPAY REFUND when admin sets REFUND_INITIATED (online orders only) ──

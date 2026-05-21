@@ -28,6 +28,20 @@ export const uploadToCloudinary = (buffer, folder = "ecommerce") => {
   });
 };
 
+export const uploadVideoToCloudinary = (buffer, folder = "ecommerce/returns") => {
+  configure();
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder, resource_type: "video" },
+      (error, result) => {
+        if (error) reject(error);
+        else resolve(result);
+      }
+    );
+    Readable.from(buffer).pipe(stream);
+  });
+};
+
 export const deleteFromCloudinary = async (publicId) => {
   configure();
   return cloudinary.uploader.destroy(publicId);

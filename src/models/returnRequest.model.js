@@ -25,7 +25,11 @@ const returnRequestSchema = new mongoose.Schema(
     reason:      { type: String, required: true },
     description: String,
     resolution:  { type: String, enum: ["refund", "replacement", "store_credit"], default: "refund" },
-    images:      [String],
+    evidence: [{
+      url:      { type: String, required: true },
+      publicId: String,
+      type:     { type: String, enum: ["image", "video"], default: "image" },
+    }],
 
     // Refund payment preference (for resolution=refund)
     refundMethod: {

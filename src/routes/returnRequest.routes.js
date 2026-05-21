@@ -12,7 +12,7 @@ import {
 } from "../controllers/returnRequest.controller.js";
 import { protect }    from "../middleware/auth.middleware.js";
 import { authorize }  from "../middleware/role.middleware.js";
-import { uploadMultiple } from "../middleware/upload.middleware.js";
+import { uploadReturnEvidence } from "../middleware/upload.middleware.js";
 
 const router = Router();
 
@@ -27,7 +27,7 @@ router.get("/",                     authorize("admin"), getAllReturnRequests);
 router.get("/employee",               authorize("employee", "admin"), getEmployeeReturnRequests);
 
 // Customer
-router.post("/",                    uploadMultiple("images", 3), createReturnRequest);
+router.post("/",                    uploadReturnEvidence, createReturnRequest);
 router.get("/my",                   getMyReturnRequests);
 
 // Parameterised routes last

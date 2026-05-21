@@ -3,7 +3,6 @@ import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import Coupon from "../models/coupon.model.js";
 import Employee from "../models/employee.model.js";
-import Notification from "../models/notification.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
@@ -275,16 +274,19 @@ export const cancelOrder = async (req, res, next) => {
       }
     }
 
-    // Restore stock
-    const employeeIds = new Set();
-    for (const item of order.orderItems) {
-      const product = await Product.findByIdAndUpdate(
-        item.product,
-        { $inc: { stock: item.quantity, sold: -item.quantity } },
-        { new: true }
-      );
-      if (product?.employee) employeeIds.add(product.employee.toString());
-    }
+    // Restore stock — bulk update instead of N individual queries
+    const productIds = order.orderItems.map(i => i.product);
+    const productDocs = await Product.find({ _id: { $in: productIds } }).select("employee").lean();
+    const employeeIds = new Set(productDocs.filter(p => p.employee).map(p => p.employee.toString()));
+
+    await Product.bulkWrite(
+      order.orderItems.map(item => ({
+        updateOne: {
+          filter: { _id: item.product },
+          update: { $inc: { stock: item.quantity, sold: -item.quantity } },
+        },
+      }))
+    );
 
     // Build refund message for customer notification
     let refundMsg = "";

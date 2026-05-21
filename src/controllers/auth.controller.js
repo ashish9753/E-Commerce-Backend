@@ -12,6 +12,7 @@ export const register = async (req, res, next) => {
     if (!name || !email || !phone || !password) {
       throw new ApiError(400, "All fields are required");
     }
+    if (password.length < 8) throw new ApiError(400, "Password must be at least 8 characters");
 
     const existingUser = await User.findOne({ email });
     if (existingUser) throw new ApiError(409, "Email already registered");
@@ -105,7 +106,10 @@ export const forgotPassword = async (req, res, next) => {
     if (!email) throw new ApiError(400, "Email is required");
 
     const user = await User.findOne({ email });
-    if (!user) throw new ApiError(404, "No user found with this email");
+    if (!user) {
+      // Return same message whether email exists or not — prevents email enumeration
+      return res.json(new ApiResponse(200, null, "If this email is registered, a reset link has been sent"));
+    }
 
     const resetToken = crypto.randomBytes(32).toString("hex");
     user.resetPasswordToken = crypto.createHash("sha256").update(resetToken).digest("hex");
@@ -127,6 +131,7 @@ export const resetPassword = async (req, res, next) => {
     const { password } = req.body;
 
     if (!password) throw new ApiError(400, "New password is required");
+    if (password.length < 8) throw new ApiError(400, "Password must be at least 8 characters");
 
     const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
     const user = await User.findOne({
