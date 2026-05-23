@@ -108,21 +108,25 @@ export const placeOrder = async (req, res, next) => {
     // Price calculations
     const shippingPrice = itemsPrice >= SHIPPING_THRESHOLD ? 0 : SHIPPING_PRICE;
 
-    // Coupon discount (from cart)
+    // Coupon discount (from cart). We *re-validate* here against the freshly
+    // computed itemsPrice and fail loudly if anything is off — never silently
+    // strip a discount the customer thought they had.
     let discountAmount = 0;
     let couponId = null;
 
     if (useCart) {
-      const cart = await Cart.findOne({ user: user._id }).populate("coupon");
+      const cart = await Cart.findOne({ user: user._id });
       if (cart?.coupon) {
         const coupon = await Coupon.findById(cart.coupon);
-        if (coupon) {
-          const validity = coupon.isValid(itemsPrice, user._id);
-          if (validity.valid) {
-            discountAmount = coupon.calculateDiscount(itemsPrice);
-            couponId = coupon._id;
-          }
+        if (!coupon) {
+          throw new ApiError(400, "The coupon on your cart no longer exists. Please remove it and try again.");
         }
+        const validity = coupon.isValid(itemsPrice, user._id);
+        if (!validity.valid) {
+          throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${validity.message}. Please update your cart.`);
+        }
+        discountAmount = coupon.calculateDiscount(itemsPrice);
+        couponId = coupon._id;
       }
     }
 
@@ -201,6 +205,9 @@ export const placeOrder = async (req, res, next) => {
     // Provide clean error message from queue processor
     if (err.message?.includes("out of stock") || err.message?.includes("not available")) {
       return next(new ApiError(409, err.message));
+    }
+    if (err.message?.startsWith("Coupon")) {
+      return next(new ApiError(400, err.message));
     }
     next(err);
   }

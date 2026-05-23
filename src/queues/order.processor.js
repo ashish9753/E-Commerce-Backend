@@ -120,13 +120,31 @@ export const processOrderJob = async (job) => {
     }));
     await InventoryLog.insertMany(inventoryLogs, so());
 
-    // --- Step 4: Mark coupon as used ---
+    // --- Step 4: Atomically claim coupon usage ---
+    // This is the only place coupon usage is committed. The guarded update
+    // means concurrent orders from the same user (or against a globally
+    // capped coupon) cannot both succeed — exactly one wins, the other
+    // gets a clean "no longer valid" error and the order is rolled back.
     if (couponId) {
-      await Coupon.findByIdAndUpdate(
-        couponId,
+      const now = new Date();
+      const claim = await Coupon.findOneAndUpdate(
+        {
+          _id: couponId,
+          isActive: true,
+          expiryDate: { $gt: now },
+          usedBy: { $ne: userId },
+          $or: [
+            { usageLimit: null },
+            { usageLimit: { $exists: false } },
+            { $expr: { $lt: ["$usedCount", "$usageLimit"] } },
+          ],
+        },
         { $inc: { usedCount: 1 }, $addToSet: { usedBy: userId } },
-        so()
+        so({ new: true })
       );
+      if (!claim) {
+        throw new Error("Coupon is no longer valid or has already been used");
+      }
     }
 
     // --- Step 5: Clear user cart ---

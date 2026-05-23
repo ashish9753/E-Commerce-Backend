@@ -113,15 +113,24 @@ export const clearCart = async (req, res, next) => {
   }
 };
 
+// Coupon codes are short alphanumerics with optional dashes/underscores.
+// Asserting the type here prevents NoSQL operator injection (e.g. { "$ne": null }).
+const COUPON_CODE_RE = /^[A-Z0-9_-]{2,32}$/;
+const normalizeCouponCode = (raw) => {
+  if (typeof raw !== "string") return null;
+  const code = raw.trim().toUpperCase();
+  return COUPON_CODE_RE.test(code) ? code : null;
+};
+
 export const applyCoupon = async (req, res, next) => {
   try {
-    const { code } = req.body;
-    if (!code) throw new ApiError(400, "Coupon code required");
+    const code = normalizeCouponCode(req.body?.code);
+    if (!code) throw new ApiError(400, "Invalid coupon code");
 
     const cart = await Cart.findOne({ user: req.user._id });
     if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
 
-    const coupon = await Coupon.findOne({ code: code.toUpperCase() });
+    const coupon = await Coupon.findOne({ code });
     if (!coupon) throw new ApiError(404, "Invalid coupon code");
 
     const validity = coupon.isValid(cart.totalPrice, req.user._id);
@@ -130,7 +139,7 @@ export const applyCoupon = async (req, res, next) => {
     const discount = coupon.calculateDiscount(cart.totalPrice);
     cart.coupon = coupon._id;
     cart.discountAmount = discount;
-    cart.finalPrice = cart.totalPrice - discount;
+    cart.finalPrice = parseFloat((cart.totalPrice - discount).toFixed(2));
     await cart.save();
 
     res.json(new ApiResponse(200, { discount, finalPrice: cart.finalPrice }, `Coupon applied! You saved ₹${discount}`));

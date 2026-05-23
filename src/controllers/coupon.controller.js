@@ -1,7 +1,17 @@
 import Coupon from "../models/coupon.model.js";
+import Cart from "../models/cart.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+
+// See cart.controller.js — same pattern; coupon codes must be a literal string,
+// not an object/array (which would otherwise reach Mongo as a query operator).
+const COUPON_CODE_RE = /^[A-Z0-9_-]{2,32}$/;
+const normalizeCouponCode = (raw) => {
+  if (typeof raw !== "string") return null;
+  const code = raw.trim().toUpperCase();
+  return COUPON_CODE_RE.test(code) ? code : null;
+};
 
 export const createCoupon = async (req, res, next) => {
   try {
@@ -60,17 +70,31 @@ export const deleteCoupon = async (req, res, next) => {
 
 export const validateCoupon = async (req, res, next) => {
   try {
-    const { code, orderAmount } = req.body;
-    if (!code || !orderAmount) throw new ApiError(400, "code and orderAmount required");
+    const code = normalizeCouponCode(req.body?.code);
+    if (!code) throw new ApiError(400, "Invalid coupon code");
 
-    const coupon = await Coupon.findOne({ code: code.toUpperCase() });
+    // Always price against the server cart — never trust a client-supplied amount.
+    const cart = await Cart.findOne({ user: req.user._id });
+    if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
+    const orderAmount = cart.totalPrice;
+
+    const coupon = await Coupon.findOne({ code });
     if (!coupon) throw new ApiError(404, "Invalid coupon code");
 
-    const validity = coupon.isValid(parseFloat(orderAmount), req.user._id);
+    const validity = coupon.isValid(orderAmount, req.user._id);
     if (!validity.valid) throw new ApiError(400, validity.message);
 
-    const discount = coupon.calculateDiscount(parseFloat(orderAmount));
-    res.json(new ApiResponse(200, { discount, finalAmount: parseFloat(orderAmount) - discount, coupon: { _id: coupon._id, code: coupon.code, discountType: coupon.discountType, discountValue: coupon.discountValue } }));
+    const discount = coupon.calculateDiscount(orderAmount);
+    res.json(new ApiResponse(200, {
+      discount,
+      finalAmount: parseFloat((orderAmount - discount).toFixed(2)),
+      coupon: {
+        _id: coupon._id,
+        code: coupon.code,
+        discountType: coupon.discountType,
+        discountValue: coupon.discountValue,
+      },
+    }));
   } catch (err) {
     next(err);
   }
