@@ -6,7 +6,17 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "load:setup": "node scripts/setup-load-test.js",
+    "load:test": "node scripts/run-load-test.js",
+    "load:k6": "k6 run load-test.js",
+    "load:verify": "node scripts/verify-load-test.js"
+  },
+  "nodemonConfig": {
+    "ignore": [
+      "load-test-users.json",
+      "load-test-summary.json"
+    ]
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

@@ -1,6 +1,7 @@
 import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
+import User from "../models/user.model.js";
 import Coupon from "../models/coupon.model.js";
 import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
@@ -8,7 +9,6 @@ import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
-import { autoRefund } from "../utils/refund.utils.js";
 
 const ORDER_STATUS_MESSAGES = {
   CONFIRMED:        { title: "Order Confirmed ✅",          message: "Your order has been confirmed and is being prepared." },
@@ -286,22 +286,6 @@ export const cancelOrder = async (req, res, next) => {
 
     await order.save();
 
-    // Auto Razorpay refund for online-paid orders (refundable portion only)
-    let refundResult = null;
-    if (order.paymentStatus === "PAID" && order.paymentMethod === "ONLINE" && refundable > 0) {
-      refundResult = await autoRefund(
-        order._id,
-        refundable,
-        `Order #${order.orderNumber} cancelled`
-      );
-      if (refundResult.success) {
-        await Order.findByIdAndUpdate(order._id, {
-          refundStatus: "COMPLETED",
-          refundAmount: refundResult.refundAmount,
-        });
-      }
-    }
-
     // Restore stock — bulk update instead of N individual queries
     const productIds = order.orderItems.map(i => i.product);
     const productDocs = await Product.find({ _id: { $in: productIds } }).select("employee").lean();
@@ -319,12 +303,10 @@ export const cancelOrder = async (req, res, next) => {
     // Build refund message for customer notification
     let refundMsg = "";
     if (order.paymentStatus === "PAID") {
-      if (refundResult?.success) {
-        refundMsg = ` ₹${refundResult.refundAmount} has been refunded to your original payment method.`;
-      } else if (order.paymentMethod === "ONLINE") {
-        refundMsg = ` Refund could not be processed automatically — our team will reach out.`;
+      if (order.paymentMethod === "ONLINE") {
+        refundMsg = ` Your refund will be processed manually by our team within 3–5 business days.`;
       } else {
-        refundMsg = ` A refund will be processed to your bank account shortly.`;
+        refundMsg = ` A refund will be processed to your bank account by our team shortly.`;
       }
     }
 
@@ -371,6 +353,20 @@ export const getAllOrders = async (req, res, next) => {
     }
     if (req.query.userId && /^[0-9a-fA-F]{24}$/.test(req.query.userId)) {
       filter.user = req.query.userId;
+    }
+    if (req.query.search) {
+      const s = req.query.search.trim();
+      const matchingUserIds = await User.find({
+        $or: [
+          { name:  { $regex: s, $options: "i" } },
+          { email: { $regex: s, $options: "i" } },
+          { phone: { $regex: s, $options: "i" } },
+        ],
+      }).distinct("_id");
+      filter.$or = [
+        { orderNumber: { $regex: s, $options: "i" } },
+        { user: { $in: matchingUserIds } },
+      ];
     }
 
     const [orders, total] = await Promise.all([
@@ -456,16 +452,8 @@ export const employeeUpdateOrderStatus = async (req, res, next) => {
       throw new ApiError(400, `Employees can only set status to: ${employeeAllowedStatuses.join(", ")}`);
     }
 
-    const employee = await Employee.findOne({ user: req.user._id });
-    if (!employee) throw new ApiError(403, "Employee profile not found");
-
     const order = await Order.findById(req.params.orderId);
     if (!order) throw new ApiError(404, "Order not found");
-
-    // Ensure this order contains at least one of the employee's products
-    const employeeProductIds = (await Product.find({ employee: employee._id }).select("_id")).map(p => p._id.toString());
-    const hasEmployeeProduct = order.orderItems.some(item => employeeProductIds.includes(item.product?.toString()));
-    if (!hasEmployeeProduct) throw new ApiError(403, "This order does not contain your products");
 
     order.orderStatus = status;
     order.statusHistory.push({ status, note: note || `Status updated by employee`, timestamp: new Date() });
@@ -496,15 +484,24 @@ export const employeeUpdateOrderStatus = async (req, res, next) => {
 
 export const getEmployeeOrders = async (req, res, next) => {
   try {
-    const employee = await Employee.findOne({ user: req.user._id });
-    if (!employee) throw new ApiError(404, "Employee profile not found");
-
-    const products = await Product.find({ employee: employee._id }).select("_id");
-    const productIds = products.map((p) => p._id);
-
     const { page, limit, skip } = getPaginationData(req.query);
-    const filter = { "orderItems.product": { $in: productIds } };
+    const filter = {};
     if (req.query.status) filter.orderStatus = req.query.status;
+    if (req.query.paymentStatus) filter.paymentStatus = req.query.paymentStatus;
+    if (req.query.search) {
+      const s = req.query.search.trim();
+      const matchingUserIds = await User.find({
+        $or: [
+          { name:  { $regex: s, $options: "i" } },
+          { email: { $regex: s, $options: "i" } },
+          { phone: { $regex: s, $options: "i" } },
+        ],
+      }).distinct("_id");
+      filter.$or = [
+        { orderNumber: { $regex: s, $options: "i" } },
+        { user: { $in: matchingUserIds } },
+      ];
+    }
 
     const [orders, total] = await Promise.all([
       Order.find(filter)
@@ -518,22 +515,19 @@ export const getEmployeeOrders = async (req, res, next) => {
 
     const RETURNED_STATUSES = ["RETURNED", "CANCELLED"];
 
-    // Revenue = paid orders that have NOT been returned/cancelled
     const [revenueAgg, refundedAgg, statusAgg] = await Promise.all([
       Order.aggregate([
-        { $match: { "orderItems.product": { $in: productIds }, paymentStatus: "PAID", orderStatus: { $nin: RETURNED_STATUSES } } },
+        { $match: { paymentStatus: "PAID", orderStatus: { $nin: RETURNED_STATUSES } } },
         { $group: { _id: null, total: { $sum: "$totalPrice" } } },
       ]),
-      // Refunded: explicitly refunded OR paid-then-returned/cancelled
       Order.aggregate([
-        { $match: { "orderItems.product": { $in: productIds }, $or: [
+        { $match: { $or: [
           { paymentStatus: "REFUNDED" },
           { paymentStatus: "PAID", orderStatus: { $in: RETURNED_STATUSES } },
         ]}},
         { $group: { _id: null, total: { $sum: "$refundAmount" }, orderTotal: { $sum: "$totalPrice" } } },
       ]),
       Order.aggregate([
-        { $match: { "orderItems.product": { $in: productIds } } },
         { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
       ]),
     ]);

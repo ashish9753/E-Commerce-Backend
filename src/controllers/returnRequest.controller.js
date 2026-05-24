@@ -7,7 +7,6 @@ import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
-import { autoRefund } from "../utils/refund.utils.js";
 import { uploadToCloudinary, uploadVideoToCloudinary } from "../utils/cloudinary.utils.js";
 
 const pushTimeline = (doc, status, note, by = "system") => {
@@ -17,7 +16,7 @@ const pushTimeline = (doc, status, note, by = "system") => {
 /* ─── Customer: submit return ─── */
 export const createReturnRequest = async (req, res, next) => {
   try {
-    const { orderId, productId, reason, description, resolution } = req.body;
+    const { orderId, productId, reason, description, resolution, refundMethod: bodyRefundMethod, bankDetails: bodyBankDetails } = req.body;
     if (!orderId || !reason) throw new ApiError(400, "orderId and reason are required");
 
     const photoFiles = req.files?.photos || [];
@@ -65,7 +64,13 @@ export const createReturnRequest = async (req, res, next) => {
 
     // For COD orders, force refund method to bank_transfer (no original payment to return to)
     const isCOD = order.paymentMethod === "COD";
-    const defaultRefundMethod = isCOD ? "bank_transfer" : "original_payment";
+    const validMethods = ["original_payment", "bank_transfer", "upi"];
+    let chosenRefundMethod = (bodyRefundMethod && validMethods.includes(bodyRefundMethod)) ? bodyRefundMethod : (isCOD ? "bank_transfer" : "original_payment");
+    if (isCOD && chosenRefundMethod === "original_payment") chosenRefundMethod = "bank_transfer";
+    let parsedBankDetails = {};
+    if (bodyBankDetails) {
+      try { parsedBankDetails = typeof bodyBankDetails === "string" ? JSON.parse(bodyBankDetails) : bodyBankDetails; } catch {}
+    }
 
     // Deduct non-refundable COD booking amount if it was paid
     const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
@@ -92,7 +97,8 @@ export const createReturnRequest = async (req, res, next) => {
       description,
       resolution:   resolution || "refund",
       refundAmount: refundableAmount,
-      refundMethod: defaultRefundMethod,
+      refundMethod: chosenRefundMethod,
+      bankDetails:  Object.keys(parsedBankDetails).length ? parsedBankDetails : undefined,
       evidence,
       timeline: [{ status: "REQUESTED", note: "Return request submitted by customer", by: "system" }],
     });
@@ -299,7 +305,6 @@ export const employeeAdvanceReturn = async (req, res, next) => {
     });
     if (!returnReq) throw new ApiError(404, "Return request not found");
 
-    // Employee can advance from APPROVED (admin-approved) or their own pickup pipeline
     const pipeline = {
       APPROVED:         "PICKUP_SCHEDULED",
       PICKUP_SCHEDULED: "ITEM_RECEIVED",
@@ -339,6 +344,20 @@ export const employeeAdvanceReturn = async (req, res, next) => {
         refundStatus: "COMPLETED",
         refundAmount: returnReq.refundAmount,
       });
+    }
+
+    // Upload refund proof screenshots (optional — meaningful for REFUND_INITIATED/COMPLETED)
+    const proofFiles = req.files || [];
+    if (proofFiles.length > 0) {
+      for (const file of proofFiles) {
+        const result = await uploadToCloudinary(file.buffer, "returns/refund-proof");
+        returnReq.refundProof.push({
+          url: result.secure_url,
+          publicId: result.public_id,
+          uploadedBy: "employee",
+          uploadedAt: new Date(),
+        });
+      }
     }
 
     pushTimeline(returnReq, nextStatus, note || `Employee marked: ${nextStatus.replace(/_/g, " ")}`, "employee");
@@ -457,37 +476,16 @@ export const processReturnRequest = async (req, res, next) => {
       );
     }
 
-    // ── AUTO RAZORPAY REFUND when admin sets REFUND_INITIATED (online orders only) ──
-    let autoRefundResult = null;
-    if (status === "REFUND_INITIATED" && returnReq.order?.paymentMethod === "ONLINE") {
-      autoRefundResult = await autoRefund(
-        returnReq.order._id,
-        returnReq.refundAmount || returnReq.order.totalPrice,
-        `Return #${returnReq._id} — ${returnReq.reason}`
-      );
-
-      if (autoRefundResult.success) {
-        // Auto-advance to REFUND_COMPLETED since Razorpay accepted it
-        returnReq.status      = "REFUND_COMPLETED";
-        returnReq.resolvedAt  = new Date();
-        pushTimeline(
-          returnReq,
-          "REFUND_COMPLETED",
-          `Auto-refunded ₹${autoRefundResult.refundAmount} via Razorpay (ID: ${autoRefundResult.refundId})`,
-          "system"
-        );
-        await Order.findByIdAndUpdate(returnReq.order._id, { refundStatus: "COMPLETED" });
-      } else {
-        // Razorpay failed — keep status as REFUND_INITIATED, admin must retry or do manual
-        pushTimeline(
-          returnReq,
-          "REFUND_INITIATED",
-          `Auto-refund failed: ${autoRefundResult.error}. Manual action required.`,
-          "system"
-        );
-        await Order.findByIdAndUpdate(returnReq.order._id, {
-          refundStatus: "PROCESSING",
-          refundAmount: returnReq.refundAmount,
+    // ── Upload refund proof screenshots (optional) ──
+    const proofFiles = req.files || [];
+    if (proofFiles.length > 0) {
+      for (const file of proofFiles) {
+        const result = await uploadToCloudinary(file.buffer, "returns/refund-proof");
+        returnReq.refundProof.push({
+          url: result.secure_url,
+          publicId: result.public_id,
+          uploadedBy: "admin",
+          uploadedAt: new Date(),
         });
       }
     }
@@ -506,12 +504,7 @@ export const processReturnRequest = async (req, res, next) => {
       PICKUP_SCHEDULED: { title: "Pickup Scheduled 🚚",   message: "Your return pickup has been scheduled." },
       ITEM_RECEIVED:    { title: "Item Received 📬",       message: "Your returned item has been received. Refund is being processed." },
       REFUND_INITIATED: { title: "Refund Initiated 💸",    message: "Your refund has been initiated. It may take 3–7 business days to reach your account." },
-      REFUND_COMPLETED: {
-        title:   "Refund Completed! 🎉",
-        message: autoRefundResult?.success
-          ? `₹${autoRefundResult.refundAmount} has been refunded to your original payment method. It may take 5–7 business days to reflect.`
-          : "Your refund has been marked complete. Please check your account or contact support.",
-      },
+      REFUND_COMPLETED: { title: "Refund Completed! 🎉",   message: "Your refund has been marked complete. Please check your account or contact support if needed." },
       REPLACEMENT_SENT: { title: "Replacement Shipped 📦", message: "Your replacement item has been shipped." },
       COMPLETED:        { title: "Return Completed ✅",    message: "Your return/refund case has been fully resolved." },
     };
@@ -541,19 +534,7 @@ export const processReturnRequest = async (req, res, next) => {
       }
     }
 
-    // Build response — include refund outcome so admin UI can show it
-    const responseData = { returnRequest: returnReq };
-    if (autoRefundResult) {
-      responseData.autoRefund = autoRefundResult;
-    }
-
-    res.json(new ApiResponse(
-      200,
-      responseData,
-      autoRefundResult?.success
-        ? `Return updated — ₹${autoRefundResult.refundAmount} auto-refunded via Razorpay`
-        : `Return updated to ${finalStatus}`
-    ));
+    res.json(new ApiResponse(200, { returnRequest: returnReq }, `Return updated to ${finalStatus}`));
   } catch (err) {
     next(err);
   }

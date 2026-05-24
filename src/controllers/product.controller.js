@@ -194,11 +194,8 @@ export const deleteProduct = async (req, res, next) => {
 
 export const getMyProducts = async (req, res, next) => {
   try {
-    const employee = await Employee.findOne({ user: req.user._id });
-    if (!employee) throw new ApiError(404, "Employee profile not found");
-
     const { page, limit, skip } = getPaginationData(req.query);
-    const filter = { employee: employee._id, isDeleted: false };
+    const filter = { isDeleted: false };
 
     const [products, total] = await Promise.all([
       Product.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }),

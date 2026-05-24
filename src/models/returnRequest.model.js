@@ -63,6 +63,14 @@ const returnRequestSchema = new mongoose.Schema(
     employeeActionAt: Date,
     resolvedAt:      Date,
 
+    // Proof uploaded by employee/admin when processing refund
+    refundProof: [{
+      url:        { type: String, required: true },
+      publicId:   String,
+      uploadedBy: { type: String, enum: ['employee', 'admin'], default: 'admin' },
+      uploadedAt: { type: Date, default: Date.now },
+    }],
+
     timeline: [timelineEventSchema],
   },
   { timestamps: true }

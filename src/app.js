@@ -3,7 +3,7 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import cookieParser from "cookie-parser";
-import rateLimit from "express-rate-limit";
+// import rateLimit from "express-rate-limit";
 
 import { errorHandler, notFound } from "./middleware/error.middleware.js";
 import { mongoSanitize } from "./middleware/sanitize.middleware.js";
@@ -22,14 +22,15 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(cookieParser());
 app.use(mongoSanitize);
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 500,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many requests, please try again later." },
-});
-app.use("/api", limiter);
+// Temporarily disabled for load testing.
+// const limiter = rateLimit({
+//   windowMs: 15 * 60 * 1000,
+//   max: 500,
+//   standardHeaders: true,
+//   legacyHeaders: false,
+//   message: { message: "Too many requests, please try again later." },
+// });
+// app.use("/api", limiter);
 
 app.get("/health", (req, res) => res.json({ status: "OK", timestamp: new Date() }));
 

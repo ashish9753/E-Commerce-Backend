@@ -163,6 +163,14 @@ export const getAllUsers = async (req, res, next) => {
     const filter = {};
     if (req.query.role) filter.role = req.query.role;
     if (req.query.isBlocked !== undefined) filter.isBlocked = req.query.isBlocked === "true";
+    if (req.query.search) {
+      const s = req.query.search.trim();
+      filter.$or = [
+        { name:  { $regex: s, $options: "i" } },
+        { email: { $regex: s, $options: "i" } },
+        { phone: { $regex: s, $options: "i" } },
+      ];
+    }
 
     const [users, total] = await Promise.all([
       User.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }),

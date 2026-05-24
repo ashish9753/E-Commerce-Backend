@@ -39,4 +39,7 @@ export const uploadReturnEvidence = evidenceUpload.fields([
   { name: "video",  maxCount: 1 },
 ]);
 
+// For admin/employee refund proof screenshots
+export const uploadRefundProof = upload.array("refundProof", 5);
+
 export default upload;

@@ -1,10 +1,13 @@
 import Employee from "../models/employee.model.js";
 import User from "../models/user.model.js";
+import SalaryRecord from "../models/salaryRecord.model.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { notify, notifyAdmins } from "../utils/notify.js";
+
+const MONTH_NAMES = ["","January","February","March","April","May","June","July","August","September","October","November","December"];
 
 export const registerEmployee = async (req, res, next) => {
   try {
@@ -50,9 +53,9 @@ export const registerEmployee = async (req, res, next) => {
 
 export const adminCreateEmployee = async (req, res, next) => {
   try {
-    const { name, email, phone, password, shopName, gstNumber, businessAddress, shopDescription } = req.body;
-    if (!name || !email || !phone || !password || !shopName)
-      throw new ApiError(400, "Name, email, phone, password and shop name are required");
+    const { name, email, phone, password, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription } = req.body;
+    if (!name || !email || !phone || !password)
+      throw new ApiError(400, "Name, email, phone and password are required");
 
     const existing = await User.findOne({ email });
     if (existing) throw new ApiError(409, "Email already registered");
@@ -61,17 +64,21 @@ export const adminCreateEmployee = async (req, res, next) => {
 
     const employee = await Employee.create({
       user: user._id,
-      shopName,
+      shopName: name,
       gstNumber,
       businessAddress,
       shopDescription,
+      designation,
+      department,
+      joiningDate: joiningDate || undefined,
+      monthlySalary: monthlySalary ? Number(monthlySalary) : 0,
       isVerified: true,
     });
 
     await notify({
       userId:  user._id,
-      title:   "Welcome to the Team! 🏪",
-      message: `Your employee account for "${shopName}" has been created and verified by admin. You can now log in.`,
+      title:   "Welcome to the Team!",
+      message: `Your employee account has been created and verified by admin. You can now log in.`,
       type:    "SYSTEM",
     });
 
@@ -209,4 +216,149 @@ export const getEmployeeById = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+// ── Admin: update employee details + account ────────────────────────
+export const updateEmployee = async (req, res, next) => {
+  try {
+    const { name, email, phone, newPassword, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription } = req.body;
+
+    const employee = await Employee.findById(req.params.employeeId);
+    if (!employee) throw new ApiError(404, "Employee not found");
+
+    // Update User account fields
+    const user = await User.findById(employee.user).select("+password");
+    if (!user) throw new ApiError(404, "User account not found");
+    if (name)  user.name  = name;
+    if (phone) user.phone = phone;
+    if (email && email !== user.email) {
+      const taken = await User.findOne({ email: email.toLowerCase(), _id: { $ne: user._id } });
+      if (taken) throw new ApiError(409, "Email is already in use by another account");
+      user.email = email.toLowerCase();
+    }
+    if (newPassword) user.password = newPassword; // pre-save hook hashes it
+    await user.save();
+
+    // Update Employee document
+    const update = {};
+    if (designation    !== undefined) update.designation    = designation;
+    if (department     !== undefined) update.department     = department;
+    if (businessAddress!== undefined) update.businessAddress= businessAddress;
+    if (gstNumber      !== undefined) update.gstNumber      = gstNumber;
+    if (shopDescription!== undefined) update.shopDescription= shopDescription;
+    if (monthlySalary  !== undefined) update.monthlySalary  = monthlySalary ? Number(monthlySalary) : 0;
+    if (joiningDate)                  update.joiningDate    = joiningDate;
+
+    const updated = await Employee.findByIdAndUpdate(
+      req.params.employeeId, update, { new: true }
+    ).populate("user", "name email phone");
+
+    res.json(new ApiResponse(200, { employee: updated }, "Employee updated"));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: block / unblock employee ─────────────────────────────────
+export const blockEmployee = async (req, res, next) => {
+  try {
+    const employee = await Employee.findById(req.params.employeeId);
+    if (!employee) throw new ApiError(404, "Employee not found");
+    const blocked = !employee.isBlocked;
+    await Promise.all([
+      Employee.findByIdAndUpdate(req.params.employeeId, { isBlocked: blocked }),
+      User.findByIdAndUpdate(employee.user, { isBlocked: blocked }),
+    ]);
+    res.json(new ApiResponse(200, { isBlocked: blocked }, `Employee ${blocked ? "blocked" : "unblocked"}`));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: delete employee ───────────────────────────────────────────
+export const deleteEmployee = async (req, res, next) => {
+  try {
+    const employee = await Employee.findByIdAndDelete(req.params.employeeId);
+    if (!employee) throw new ApiError(404, "Employee not found");
+    await User.findByIdAndUpdate(employee.user, { role: "user" });
+    await SalaryRecord.deleteMany({ employee: req.params.employeeId });
+    res.json(new ApiResponse(200, null, "Employee removed"));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: get salary records for an employee ────────────────────────
+export const getEmployeeSalary = async (req, res, next) => {
+  try {
+    const records = await SalaryRecord.find({ employee: req.params.employeeId }).sort({ year: -1, month: -1 });
+    const employee = await Employee.findById(req.params.employeeId).select("monthlySalary shopName designation");
+    res.json(new ApiResponse(200, { records, employee }));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: add monthly salary record ────────────────────────────────
+export const addSalaryRecord = async (req, res, next) => {
+  try {
+    const { month, year, baseSalary, deductions, bonuses, status, notes } = req.body;
+    if (!month || !year || baseSalary == null)
+      throw new ApiError(400, "month, year, and baseSalary are required");
+
+    const exists = await SalaryRecord.findOne({ employee: req.params.employeeId, month: Number(month), year: Number(year) });
+    if (exists) throw new ApiError(409, `Salary record for ${MONTH_NAMES[month]} ${year} already exists`);
+
+    const record = new SalaryRecord({
+      employee: req.params.employeeId,
+      month: Number(month), year: Number(year),
+      baseSalary: Number(baseSalary),
+      deductions: deductions || [],
+      bonuses:    bonuses    || [],
+      status:     status     || "PENDING",
+      notes,
+    });
+    await record.save();
+
+    const employee = await Employee.findById(req.params.employeeId);
+    if (employee) {
+      await notify({
+        userId:  employee.user,
+        title:   "Salary Record Added 💰",
+        message: `Your salary for ${MONTH_NAMES[month]} ${year} has been recorded. Net: ₹${record.netSalary.toLocaleString("en-IN")}.`,
+        type:    "PAYMENT",
+      });
+    }
+
+    res.status(201).json(new ApiResponse(201, { record }, "Salary record added"));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: update salary record ──────────────────────────────────────
+export const updateSalaryRecord = async (req, res, next) => {
+  try {
+    const { baseSalary, deductions, bonuses, status, notes, paidAt } = req.body;
+    const record = await SalaryRecord.findById(req.params.recordId);
+    if (!record) throw new ApiError(404, "Salary record not found");
+
+    if (baseSalary != null)   record.baseSalary  = Number(baseSalary);
+    if (deductions)           record.deductions  = deductions;
+    if (bonuses)              record.bonuses     = bonuses;
+    if (status)               { record.status = status; if (status === "PAID") record.paidAt = paidAt || new Date(); }
+    if (notes !== undefined)  record.notes       = notes;
+
+    await record.save();
+    res.json(new ApiResponse(200, { record }, "Salary record updated"));
+  } catch (err) { next(err); }
+};
+
+// ── Admin: delete salary record ──────────────────────────────────────
+export const deleteSalaryRecord = async (req, res, next) => {
+  try {
+    const record = await SalaryRecord.findByIdAndDelete(req.params.recordId);
+    if (!record) throw new ApiError(404, "Salary record not found");
+    res.json(new ApiResponse(200, null, "Salary record deleted"));
+  } catch (err) { next(err); }
+};
+
+// ── Employee: view own salary records ───────────────────────────────
+export const getMySalary = async (req, res, next) => {
+  try {
+    const employee = await Employee.findOne({ user: req.user._id }).select("monthlySalary designation joiningDate");
+    if (!employee) throw new ApiError(404, "Employee profile not found");
+    const records = await SalaryRecord.find({ employee: employee._id }).sort({ year: -1, month: -1 });
+    res.json(new ApiResponse(200, { records, monthlySalary: employee.monthlySalary, designation: employee.designation, joiningDate: employee.joiningDate }));
+  } catch (err) { next(err); }
 };

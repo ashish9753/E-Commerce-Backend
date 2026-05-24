@@ -12,7 +12,7 @@ import {
 } from "../controllers/returnRequest.controller.js";
 import { protect }    from "../middleware/auth.middleware.js";
 import { authorize }  from "../middleware/role.middleware.js";
-import { uploadReturnEvidence } from "../middleware/upload.middleware.js";
+import { uploadReturnEvidence, uploadRefundProof } from "../middleware/upload.middleware.js";
 
 const router = Router();
 
@@ -34,7 +34,7 @@ router.get("/my",                   getMyReturnRequests);
 router.get("/:requestId",                   getReturnById);
 router.patch("/:requestId/refund-method",   updateRefundMethod);
 router.patch("/:requestId/employee-action", authorize("employee"), employeeActionOnReturn);
-router.patch("/:requestId/employee-advance",authorize("employee"), employeeAdvanceReturn);
-router.patch("/:requestId/process",         authorize("admin"),    processReturnRequest);
+router.patch("/:requestId/employee-advance",authorize("employee"), uploadRefundProof, employeeAdvanceReturn);
+router.patch("/:requestId/process",         authorize("admin"),    uploadRefundProof, processReturnRequest);
 
 export default router;

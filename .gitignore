@@ -10,3 +10,5 @@ coverage/
 *.key
 *.cert
 *.p12
+load-test-users.json
+load-test-summary.json
