@@ -65,6 +65,14 @@ const orderSchema = new mongoose.Schema(
     codBookingAmount:  { type: Number, default: 0 },
     codBookingUtr:     { type: String, default: "" },   // UPI transaction ref
     codBookingStatus:  { type: String, enum: ["NOT_REQUIRED", "PENDING", "PAID"], default: "NOT_REQUIRED" },
+    cancellationRefundMethod: { type: String, enum: ['bank_transfer', 'upi'] },
+    cancellationBankDetails:  { type: mongoose.Schema.Types.Mixed, default: {} },
+    cancellationRefundProof:  [{
+      url:        { type: String, required: true },
+      publicId:   String,
+      uploadedBy: { type: String, enum: ['employee', 'admin'], default: 'admin' },
+      uploadedAt: { type: Date, default: Date.now },
+    }],
   },
   { timestamps: true }
 );

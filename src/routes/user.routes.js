@@ -3,6 +3,7 @@ import {
   getProfile, updateProfile, uploadProfileImage, changePassword,
   addAddress, updateAddress, deleteAddress,
   getWishlist, toggleWishlist,
+  getSavedRefundDetails, updateSavedRefundDetails,
   getAllUsers, getUserById, toggleBlockUser, deleteUser,
 } from "../controllers/user.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
@@ -24,6 +25,9 @@ router.delete("/addresses/:addressId", deleteAddress);
 
 router.get("/wishlist", getWishlist);
 router.patch("/wishlist/:productId", toggleWishlist);
+
+router.get("/refund-details", getSavedRefundDetails);
+router.patch("/refund-details", updateSavedRefundDetails);
 
 // Admin only
 router.get("/", authorize("admin"), getAllUsers);

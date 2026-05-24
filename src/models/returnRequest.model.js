@@ -35,7 +35,7 @@ const returnRequestSchema = new mongoose.Schema(
     refundMethod: {
       type: String,
       enum: ["original_payment", "bank_transfer", "upi"],
-      default: "original_payment",
+      default: "bank_transfer",
     },
     bankDetails: bankDetailsSchema,
 

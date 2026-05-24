@@ -156,6 +156,35 @@ export const toggleWishlist = async (req, res, next) => {
   }
 };
 
+/* ─── Saved refund details (bank / UPI) ─── */
+export const getSavedRefundDetails = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select("savedRefundDetails");
+    res.json(new ApiResponse(200, { savedRefundDetails: user?.savedRefundDetails || {} }));
+  } catch (err) { next(err); }
+};
+
+export const updateSavedRefundDetails = async (req, res, next) => {
+  try {
+    const { method, bankTransfer, upi } = req.body;
+    const valid = ["bank_transfer", "upi"];
+    if (method && !valid.includes(method)) throw new ApiError(400, "Invalid method");
+
+    const update = {};
+    if (method) update["savedRefundDetails.lastRefundMethod"] = method;
+    if (bankTransfer) {
+      if (bankTransfer.accountName)   update["savedRefundDetails.bankTransfer.accountName"]   = bankTransfer.accountName;
+      if (bankTransfer.accountNumber) update["savedRefundDetails.bankTransfer.accountNumber"] = bankTransfer.accountNumber;
+      if (bankTransfer.ifscCode)      update["savedRefundDetails.bankTransfer.ifscCode"]      = bankTransfer.ifscCode;
+      if (bankTransfer.bankName)      update["savedRefundDetails.bankTransfer.bankName"]      = bankTransfer.bankName;
+    }
+    if (upi?.upiId) update["savedRefundDetails.upi.upiId"] = upi.upiId;
+
+    const user = await User.findByIdAndUpdate(req.user._id, { $set: update }, { new: true }).select("savedRefundDetails");
+    res.json(new ApiResponse(200, { savedRefundDetails: user?.savedRefundDetails || {} }, "Refund details saved"));
+  } catch (err) { next(err); }
+};
+
 // Admin controllers
 export const getAllUsers = async (req, res, next) => {
   try {

@@ -9,6 +9,7 @@ import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 
 const ORDER_STATUS_MESSAGES = {
   CONFIRMED:        { title: "Order Confirmed ✅",          message: "Your order has been confirmed and is being prepared." },
@@ -258,6 +259,8 @@ export const getOrderById = async (req, res, next) => {
 export const cancelOrder = async (req, res, next) => {
   try {
     const reasonRaw = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 500) : "";
+    const refundMethodRaw = req.body?.refundMethod;
+    const bankDetailsRaw  = req.body?.bankDetails;
     const order = await Order.findById(req.params.orderId);
     if (!order) throw new ApiError(404, "Order not found");
 
@@ -282,6 +285,30 @@ export const cancelOrder = async (req, res, next) => {
     if (order.paymentStatus === "PAID" || (order.paymentMethod === "COD" && nonRefundable > 0)) {
       order.refundStatus = "PENDING";
       order.refundAmount = refundable;
+    }
+
+    if (order.paymentStatus === "PAID" && order.paymentMethod === "ONLINE" && refundMethodRaw) {
+      const validMethods = ["bank_transfer", "upi"];
+      if (validMethods.includes(refundMethodRaw)) {
+        order.cancellationRefundMethod = refundMethodRaw;
+        let parsed = {};
+        if (bankDetailsRaw) {
+          try { parsed = typeof bankDetailsRaw === "string" ? JSON.parse(bankDetailsRaw) : bankDetailsRaw; } catch {}
+        }
+        order.cancellationBankDetails = parsed;
+        // Auto-save to user's savedRefundDetails
+        const saveUpdate = {};
+        if (refundMethodRaw === "upi" && parsed.upiId) {
+          saveUpdate["savedRefundDetails.upi"] = { upiId: parsed.upiId };
+          saveUpdate["savedRefundDetails.lastRefundMethod"] = "upi";
+        } else if (refundMethodRaw === "bank_transfer" && parsed.accountName) {
+          saveUpdate["savedRefundDetails.bankTransfer"] = parsed;
+          saveUpdate["savedRefundDetails.lastRefundMethod"] = "bank_transfer";
+        }
+        if (Object.keys(saveUpdate).length) {
+          User.findByIdAndUpdate(order.user, { $set: saveUpdate }).catch(() => {});
+        }
+      }
     }
 
     await order.save();
@@ -335,6 +362,46 @@ export const cancelOrder = async (req, res, next) => {
     }
 
     res.json(new ApiResponse(200, { order }, "Order cancelled successfully"));
+  } catch (err) {
+    next(err);
+  }
+};
+
+export const processCancellationRefund = async (req, res, next) => {
+  try {
+    const order = await Order.findById(req.params.orderId);
+    if (!order) throw new ApiError(404, "Order not found");
+    if (order.orderStatus !== "CANCELLED") throw new ApiError(400, "Order is not cancelled");
+    if (order.paymentMethod !== "ONLINE" || order.paymentStatus !== "PAID") {
+      throw new ApiError(400, "No online payment to refund");
+    }
+    if (order.refundStatus === "COMPLETED") throw new ApiError(400, "Refund already completed");
+
+    const proofFiles = req.files || [];
+    for (const file of proofFiles) {
+      const result = await uploadToCloudinary(file.buffer, "orders/refund-proof");
+      order.cancellationRefundProof.push({
+        url:        result.secure_url,
+        publicId:   result.public_id,
+        uploadedBy: req.user.role === "admin" ? "admin" : "employee",
+        uploadedAt: new Date(),
+      });
+    }
+
+    order.refundStatus  = "COMPLETED";
+    order.paymentStatus = "REFUNDED";
+    order.refundReason  = req.body?.note || "Manual refund processed";
+    await order.save();
+
+    await notify({
+      userId:  order.user,
+      title:   "Refund Processed ✅",
+      message: `Your refund of ₹${order.refundAmount} for order #${order.orderNumber} has been processed successfully.`,
+      type:    "ORDER",
+      link:    `/orders`,
+    });
+
+    res.json(new ApiResponse(200, { order }, "Refund marked as completed"));
   } catch (err) {
     next(err);
   }

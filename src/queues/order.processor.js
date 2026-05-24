@@ -176,27 +176,31 @@ export const processOrderJob = async (job) => {
       session.endSession();
     }
 
-    // --- Post-commit: notify employees + low-stock alerts (non-blocking) ---
+    // --- Post-commit: notify all employees + low-stock alerts (non-blocking) ---
     setImmediate(async () => {
       try {
-        // Find unique employees for this order's products
-        const productIds = orderItems.map(i => i.product);
-        const products   = await Product.find({ _id: { $in: productIds } }).select("employee title stock");
-        const employeeIds  = [...new Set(products.map(p => p.employee?.toString()).filter(Boolean))];
-
-        for (const employeeId of employeeIds) {
-          await notifyEmployee(employeeId, {
-            title:   "New Order Received! 📦",
-            message: `Order #${order.orderNumber} has been placed for your product(s). Please confirm and process it.`,
-            type:    "ORDER",
-            link:    "/employee",
-          });
+        // Notify employees only for COD orders (ONLINE orders notify after payment is verified)
+        if (job.data.paymentMethod === "COD") {
+          const allEmployees = await Employee.find({}).select("user").lean();
+          for (const emp of allEmployees) {
+            if (emp.user) {
+              await notify({
+                userId:  emp.user,
+                title:   "New Order Received! 📦",
+                message: `Order #${order.orderNumber} has been placed. Please confirm and process it.`,
+                type:    "ORDER",
+                link:    "/employee",
+              });
+            }
+          }
         }
 
-        // Low-stock alerts (threshold: 5)
+        // Low-stock alerts (threshold: 5) — still scoped to the product owner
+        const productIds = orderItems.map(i => i.product);
+        const products   = await Product.find({ _id: { $in: productIds } }).select("employee title stock");
         for (const product of products) {
           if (product.stock <= 5 && product.employee) {
-            await notifyEmployee(product.employee, {
+            await notifyEmployee(product.employee.toString(), {
               title:   `Low Stock Alert ⚠️`,
               message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left. Restock soon to avoid missing orders.`,
               type:    "SYSTEM",

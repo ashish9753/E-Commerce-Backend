@@ -3,6 +3,7 @@ import Order         from "../models/order.model.js";
 import Product       from "../models/product.model.js";
 import Employee      from "../models/employee.model.js";
 import InventoryLog  from "../models/inventoryLog.model.js";
+import User          from "../models/user.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError    from "../utils/ApiError.js";
@@ -11,6 +12,59 @@ import { uploadToCloudinary, uploadVideoToCloudinary } from "../utils/cloudinary
 
 const pushTimeline = (doc, status, note, by = "system") => {
   doc.timeline.push({ status, note, by, at: new Date() });
+};
+
+const parseBankDetails = (details) => {
+  if (!details) return {};
+  if (typeof details !== "string") return details;
+  try {
+    return JSON.parse(details);
+  } catch {
+    return {};
+  }
+};
+
+const sanitizeBankDetails = (refundMethod, details = {}) => {
+  if (refundMethod === "upi") {
+    const upiId = String(details.upiId || "").trim();
+    if (!upiId) throw new ApiError(400, "UPI ID is required");
+    return { upiId };
+  }
+
+  const bank = {
+    accountName: String(details.accountName || "").trim(),
+    accountNumber: String(details.accountNumber || "").trim(),
+    ifscCode: String(details.ifscCode || "").trim().toUpperCase(),
+    bankName: String(details.bankName || "").trim(),
+  };
+  if (!bank.accountName || !bank.accountNumber || !bank.ifscCode || !bank.bankName) {
+    throw new ApiError(400, "Bank account name, number, IFSC code, and bank name are required");
+  }
+  return bank;
+};
+
+const saveUserRefundDetails = async (userId, refundMethod, bankDetails) => {
+  if (refundMethod === "upi") {
+    await User.findByIdAndUpdate(userId, {
+      $set: {
+        "savedRefundDetails.upi": { upiId: bankDetails.upiId },
+        "savedRefundDetails.lastRefundMethod": "upi",
+      },
+    });
+    return;
+  }
+
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      "savedRefundDetails.bankTransfer": {
+        accountName: bankDetails.accountName,
+        accountNumber: bankDetails.accountNumber,
+        ifscCode: bankDetails.ifscCode,
+        bankName: bankDetails.bankName,
+      },
+      "savedRefundDetails.lastRefundMethod": "bank_transfer",
+    },
+  });
 };
 
 /* ─── Customer: submit return ─── */
@@ -45,13 +99,23 @@ export const createReturnRequest = async (req, res, next) => {
     let employeeId = null;
     const lookupId = productId || order.orderItems?.[0]?.product;
     let returnableProduct = null;
-    if (lookupId) {
-      returnableProduct = await Product.findById(lookupId).select("employee returnable returnWindow");
-      if (returnableProduct) employeeId = returnableProduct.employee;
+    
+    if (!lookupId) {
+      throw new ApiError(400, "No product found in order for return request");
+    }
+    
+    returnableProduct = await Product.findById(lookupId).select("employee returnable returnWindow");
+    if (!returnableProduct) {
+      throw new ApiError(404, "Product not found");
+    }
+    
+    employeeId = returnableProduct.employee;
+    if (!employeeId) {
+      throw new ApiError(400, "Product is not assigned to any employee");
     }
 
     // Validate return policy
-    if (returnableProduct && returnableProduct.returnable === false) {
+    if (returnableProduct.returnable === false) {
       throw new ApiError(400, "This product is non-returnable and cannot be returned.");
     }
 
@@ -62,15 +126,12 @@ export const createReturnRequest = async (req, res, next) => {
       throw new ApiError(400, `Return window of ${returnWindowDays} days has expired. Returns are only accepted within ${returnWindowDays} days of delivery.`);
     }
 
-    // For COD orders, force refund method to bank_transfer (no original payment to return to)
-    const isCOD = order.paymentMethod === "COD";
-    const validMethods = ["original_payment", "bank_transfer", "upi"];
-    let chosenRefundMethod = (bodyRefundMethod && validMethods.includes(bodyRefundMethod)) ? bodyRefundMethod : (isCOD ? "bank_transfer" : "original_payment");
-    if (isCOD && chosenRefundMethod === "original_payment") chosenRefundMethod = "bank_transfer";
-    let parsedBankDetails = {};
-    if (bodyBankDetails) {
-      try { parsedBankDetails = typeof bodyBankDetails === "string" ? JSON.parse(bodyBankDetails) : bodyBankDetails; } catch {}
-    }
+    const requestedResolution = resolution || "refund";
+    const validMethods = ["bank_transfer", "upi"];
+    const chosenRefundMethod = validMethods.includes(bodyRefundMethod) ? bodyRefundMethod : "bank_transfer";
+    const parsedBankDetails = requestedResolution === "refund"
+      ? sanitizeBankDetails(chosenRefundMethod, parseBankDetails(bodyBankDetails))
+      : undefined;
 
     // Deduct non-refundable COD booking amount if it was paid
     const nonRefundable = (order.codBookingStatus === "PAID" && order.codBookingAmount > 0)
@@ -95,13 +156,19 @@ export const createReturnRequest = async (req, res, next) => {
       employee:     employeeId,
       reason,
       description,
-      resolution:   resolution || "refund",
+      resolution:   requestedResolution,
       refundAmount: refundableAmount,
-      refundMethod: chosenRefundMethod,
-      bankDetails:  Object.keys(parsedBankDetails).length ? parsedBankDetails : undefined,
+      ...(requestedResolution === "refund" && {
+        refundMethod: chosenRefundMethod,
+        bankDetails:  parsedBankDetails,
+      }),
       evidence,
       timeline: [{ status: "REQUESTED", note: "Return request submitted by customer", by: "system" }],
     });
+
+    if (requestedResolution === "refund") {
+      await saveUserRefundDetails(req.user._id, chosenRefundMethod, parsedBankDetails);
+    }
 
     await Order.findByIdAndUpdate(orderId, { orderStatus: "RETURNED" });
 
@@ -139,6 +206,15 @@ export const createReturnRequest = async (req, res, next) => {
 };
 
 /* ─── Customer: single return by ID ─── */
+export const getSavedRefundDetails = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user._id).select("savedRefundDetails");
+    res.json(new ApiResponse(200, { savedRefundDetails: user?.savedRefundDetails || {} }));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const getReturnById = async (req, res, next) => {
   try {
     const ret = await ReturnRequest.findOne({ _id: req.params.requestId, user: req.user._id })
@@ -155,25 +231,22 @@ export const getReturnById = async (req, res, next) => {
 export const updateRefundMethod = async (req, res, next) => {
   try {
     const { refundMethod, bankDetails } = req.body;
-    const valid = ["original_payment", "bank_transfer", "upi"];
+    const valid = ["bank_transfer", "upi"];
     if (!valid.includes(refundMethod)) throw new ApiError(400, "Invalid refundMethod");
 
-    const ret = await ReturnRequest.findOne({ _id: req.params.requestId, user: req.user._id })
-      .populate("order", "paymentMethod");
+    const ret = await ReturnRequest.findOne({ _id: req.params.requestId, user: req.user._id });
     if (!ret) throw new ApiError(404, "Return request not found");
     if (!["REQUESTED", "EMPLOYEE_APPROVED", "APPROVED"].includes(ret.status)) {
       throw new ApiError(400, "Refund method cannot be changed at this stage");
     }
 
     // COD orders cannot refund to original payment — enforce server-side
-    if (refundMethod === "original_payment" && ret.order?.paymentMethod === "COD") {
-      throw new ApiError(400, "COD orders must use bank transfer or UPI for refund. There is no original digital payment to return to.");
-    }
-
     ret.refundMethod = refundMethod;
-    if (refundMethod !== "original_payment") ret.bankDetails = bankDetails || {};
+    const parsedBankDetails = sanitizeBankDetails(refundMethod, bankDetails);
+    ret.bankDetails = parsedBankDetails;
     ret.timeline.push({ status: ret.status, note: `Customer set refund method to ${refundMethod}`, by: "customer" });
     await ret.save();
+    await saveUserRefundDetails(req.user._id, refundMethod, parsedBankDetails);
 
     res.json(new ApiResponse(200, { returnRequest: ret }, "Refund method updated"));
   } catch (err) {
@@ -198,32 +271,20 @@ export const getMyReturnRequests = async (req, res, next) => {
   }
 };
 
-/* ─── Employee: get returns for their products ─── */
+/* ─── Employee / Admin: get all return requests ─── */
 export const getEmployeeReturnRequests = async (req, res, next) => {
   try {
-    const employee = await Employee.findOne({ user: req.user._id });
-    if (!employee) throw new ApiError(403, "Employee profile not found");
-
-    // Also pick up legacy returns where employee field wasn't set — match via order's product list
-    const employeeProducts = await Product.find({ employee: employee._id }).select("_id");
-    const employeeProductIds = employeeProducts.map(p => p._id);
-
     const { page, limit, skip } = getPaginationData(req.query);
-    const baseFilter = {
-      $or: [
-        { employee: employee._id },
-        { product: { $in: employeeProductIds } },
-      ],
-    };
-    if (req.query.status) baseFilter.status = req.query.status;
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
 
     const [requests, total] = await Promise.all([
-      ReturnRequest.find(baseFilter)
+      ReturnRequest.find(filter)
         .populate("user",    "name email")
         .populate("order",   "orderNumber totalPrice orderItems createdAt")
         .populate("product", "title images")
         .skip(skip).limit(limit).sort({ createdAt: -1 }),
-      ReturnRequest.countDocuments(baseFilter),
+      ReturnRequest.countDocuments(filter),
     ]);
     res.json(new ApiResponse(200, buildPaginatedResponse(requests, total, page, limit)));
   } catch (err) {

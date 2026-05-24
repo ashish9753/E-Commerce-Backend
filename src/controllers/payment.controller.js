@@ -2,8 +2,10 @@ import Razorpay from "razorpay";
 import crypto from "crypto";
 import Order from "../models/order.model.js";
 import Payment from "../models/payment.model.js";
+import Employee from "../models/employee.model.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { notify } from "../utils/notify.js";
 
 let _razorpay = null;
 const getRazorpay = () => {
@@ -137,6 +139,24 @@ export const verifyRazorpayPayment = async (req, res, next) => {
     order.paidAt = new Date();
     await order.save();
 
+    // Notify all employees now that payment is confirmed
+    setImmediate(async () => {
+      try {
+        const allEmployees = await Employee.find({}).select("user").lean();
+        for (const emp of allEmployees) {
+          if (emp.user) {
+            await notify({
+              userId:  emp.user,
+              title:   "New Order Received! 📦",
+              message: `Order #${order.orderNumber} has been placed and payment confirmed. Please confirm and process it.`,
+              type:    "ORDER",
+              link:    "/employee",
+            });
+          }
+        }
+      } catch { /* non-critical */ }
+    });
+
     res.json(new ApiResponse(200, { payment, order }, "Payment verified successfully"));
   } catch (err) {
     next(err);
@@ -169,58 +189,3 @@ export const getAllPayments = async (req, res, next) => {
   }
 };
 
-export const initiateRefund = async (req, res, next) => {
-  try {
-    const { orderId } = req.params;
-    const { refundAmount, reason = "refund" } = req.body;
-
-    const payment = await Payment.findOne({ order: orderId });
-    if (!payment) throw new ApiError(404, "No payment record found for this order");
-    if (payment.paymentStatus !== "SUCCESS") throw new ApiError(400, "Payment is not in SUCCESS state — cannot refund");
-    if (payment.paymentStatus === "REFUNDED") throw new ApiError(400, "Already refunded");
-    if (!payment.razorpayPaymentId) throw new ApiError(400, "No Razorpay payment ID on record — cannot initiate refund");
-
-    // Cap refund amount to the original payment amount and reject negatives/NaN
-    const requested = refundAmount === undefined ? payment.amount : Number(refundAmount);
-    if (!Number.isFinite(requested) || requested <= 0) {
-      throw new ApiError(400, "Invalid refund amount");
-    }
-    if (requested > payment.amount) {
-      throw new ApiError(400, `Refund amount (₹${requested}) exceeds original payment (₹${payment.amount})`);
-    }
-    const amountPaise = Math.round(requested * 100);
-
-    let refund;
-    try {
-      refund = await getRazorpay().payments.refund(payment.razorpayPaymentId, {
-        amount: amountPaise,
-        speed: "normal",
-        notes: { orderId: orderId.toString(), reason },
-      });
-    } catch (rzpErr) {
-      const msg = rzpErr?.error?.description || rzpErr?.message || "Razorpay API error";
-      throw new ApiError(422, `Razorpay refund failed: ${msg}`);
-    }
-
-    const updated = await Payment.findOneAndUpdate(
-      { order: orderId },
-      {
-        paymentStatus: "REFUNDED",
-        refundId: refund.id,
-        refundAmount: refund.amount / 100,
-        refundedAt: new Date(),
-      },
-      { new: true }
-    );
-
-    const order = await Order.findByIdAndUpdate(
-      orderId,
-      { paymentStatus: "REFUNDED" },
-      { new: true }
-    );
-
-    res.json(new ApiResponse(200, { refund, payment: updated, order }, "Refund initiated successfully"));
-  } catch (err) {
-    next(err);
-  }
-};

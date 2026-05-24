@@ -12,6 +12,22 @@ const addressSchema = new mongoose.Schema({
   landmark: String,
 }, { _id: true });
 
+const savedRefundDetailsSchema = new mongoose.Schema({
+  bankTransfer: {
+    accountName: String,
+    accountNumber: String,
+    ifscCode: String,
+    bankName: String,
+  },
+  upi: {
+    upiId: String,
+  },
+  lastRefundMethod: {
+    type: String,
+    enum: ["bank_transfer", "upi"],
+  },
+}, { _id: false });
+
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -21,6 +37,7 @@ const userSchema = new mongoose.Schema(
     profileImage: String,
     role: { type: String, enum: ["user", "admin", "employee"], default: "user" },
     addresses: [addressSchema],
+    savedRefundDetails: savedRefundDetailsSchema,
     wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     isBlocked: { type: Boolean, default: false },
     refreshToken: { type: String, select: false },

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   createReturnRequest,
+  getSavedRefundDetails,
   getReturnById,
   updateRefundMethod,
   getMyReturnRequests,
@@ -29,6 +30,7 @@ router.get("/employee",               authorize("employee", "admin"), getEmploye
 // Customer
 router.post("/",                    uploadReturnEvidence, createReturnRequest);
 router.get("/my",                   getMyReturnRequests);
+router.get("/refund-details",       getSavedRefundDetails);
 
 // Parameterised routes last
 router.get("/:requestId",                   getReturnById);
