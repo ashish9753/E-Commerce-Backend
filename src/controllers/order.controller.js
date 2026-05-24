@@ -7,6 +7,7 @@ import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
+import { validateCouponAudience } from "../utils/couponAudience.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
@@ -125,6 +126,10 @@ export const placeOrder = async (req, res, next) => {
         const validity = coupon.isValid(itemsPrice, user._id);
         if (!validity.valid) {
           throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${validity.message}. Please update your cart.`);
+        }
+        const audience = await validateCouponAudience(coupon, user._id);
+        if (!audience.valid) {
+          throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${audience.message}. Please update your cart.`);
         }
         discountAmount = coupon.calculateDiscount(itemsPrice);
         couponId = coupon._id;

@@ -12,6 +12,7 @@ const couponSchema = new mongoose.Schema(
     usedCount: { type: Number, default: 0 },
     usedBy: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
     isActive: { type: Boolean, default: true },
+    visibility: { type: String, enum: ['everyone', 'new_users', 'hidden'], default: 'everyone' },
   },
   { timestamps: true }
 );

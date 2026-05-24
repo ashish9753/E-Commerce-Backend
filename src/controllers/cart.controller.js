@@ -1,6 +1,7 @@
 import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Coupon from "../models/coupon.model.js";
+import { validateCouponAudience } from "../utils/couponAudience.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
@@ -135,6 +136,9 @@ export const applyCoupon = async (req, res, next) => {
 
     const validity = coupon.isValid(cart.totalPrice, req.user._id);
     if (!validity.valid) throw new ApiError(400, validity.message);
+
+    const audience = await validateCouponAudience(coupon, req.user._id);
+    if (!audience.valid) throw new ApiError(400, audience.message);
 
     const discount = coupon.calculateDiscount(cart.totalPrice);
     cart.coupon = coupon._id;

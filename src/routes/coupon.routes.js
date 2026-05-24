@@ -2,9 +2,9 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import {
   createCoupon, getAllCoupons, getCouponById,
-  updateCoupon, deleteCoupon, validateCoupon,
+  updateCoupon, deleteCoupon, validateCoupon, getPublicCoupons,
 } from "../controllers/coupon.controller.js";
-import { protect } from "../middleware/auth.middleware.js";
+import { protect, optionalAuth } from "../middleware/auth.middleware.js";
 import { authorize } from "../middleware/role.middleware.js";
 
 const router = Router();
@@ -20,6 +20,7 @@ const couponValidateLimiter = rateLimit({
   message: { message: "Too many coupon attempts, please wait a minute." },
 });
 
+router.get("/public", optionalAuth, getPublicCoupons);
 router.post("/validate", protect, couponValidateLimiter, validateCoupon);
 
 router.use(protect, authorize("admin", "employee"));

@@ -1,6 +1,8 @@
 import Coupon from "../models/coupon.model.js";
 import Cart from "../models/cart.model.js";
+import Order from "../models/order.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
+import { validateCouponAudience } from "../utils/couponAudience.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
@@ -15,11 +17,11 @@ const normalizeCouponCode = (raw) => {
 
 export const createCoupon = async (req, res, next) => {
   try {
-    const { code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit } = req.body;
+    const { code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility } = req.body;
     if (!code || !discountType || !discountValue || !expiryDate) {
       throw new ApiError(400, "code, discountType, discountValue, and expiryDate are required");
     }
-    const coupon = await Coupon.create({ code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit });
+    const coupon = await Coupon.create({ code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility });
     res.status(201).json(new ApiResponse(201, { coupon }, "Coupon created"));
   } catch (err) {
     next(err);
@@ -68,6 +70,34 @@ export const deleteCoupon = async (req, res, next) => {
   }
 };
 
+// Public endpoint: returns active, non-hidden coupons filtered by user status.
+// new_users coupons are shown only when the requester has no prior orders.
+export const getPublicCoupons = async (req, res, next) => {
+  try {
+    const now = new Date();
+    const query = {
+      isActive: true,
+      expiryDate: { $gt: now },
+      visibility: { $ne: 'hidden' },
+    };
+
+    let isNewUser = true;
+    if (req.user) {
+      const orderCount = await Order.countDocuments({ user: req.user._id });
+      isNewUser = orderCount === 0;
+    }
+
+    if (!isNewUser) {
+      query.visibility = 'everyone';
+    }
+
+    const coupons = await Coupon.find(query).sort({ createdAt: -1 }).limit(10);
+    res.json(new ApiResponse(200, { coupons }));
+  } catch (err) {
+    next(err);
+  }
+};
+
 export const validateCoupon = async (req, res, next) => {
   try {
     const code = normalizeCouponCode(req.body?.code);
@@ -83,6 +113,9 @@ export const validateCoupon = async (req, res, next) => {
 
     const validity = coupon.isValid(orderAmount, req.user._id);
     if (!validity.valid) throw new ApiError(400, validity.message);
+
+    const audience = await validateCouponAudience(coupon, req.user._id);
+    if (!audience.valid) throw new ApiError(400, audience.message);
 
     const discount = coupon.calculateDiscount(orderAmount);
     res.json(new ApiResponse(200, {
