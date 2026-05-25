@@ -194,6 +194,13 @@ export const getMyProducts = async (req, res, next) => {
     const { page, limit, skip } = getPaginationData(req.query);
     const filter = { isDeleted: false };
 
+    // Employees only see their own products; admins see all.
+    if (req.user.role !== "admin") {
+      const employee = await Employee.findOne({ user: req.user._id }).select("_id");
+      if (!employee) throw new ApiError(403, "Employee profile not found");
+      filter.employee = employee._id;
+    }
+
     const [products, total] = await Promise.all([
       Product.find(filter).skip(skip).limit(limit).sort({ createdAt: -1 }),
       Product.countDocuments(filter),

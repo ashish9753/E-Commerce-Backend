@@ -33,7 +33,7 @@ router.delete("/salary/:recordId", authorize("admin"), deleteSalaryRecord);
 router.get("/", authorize("admin"), getAllEmployees);
 
 // Parameterized routes last
-router.get("/:employeeId", getEmployeeById);
+router.get("/:employeeId", authorize("admin", "employee"), getEmployeeById);
 router.patch("/:employeeId/verify", authorize("admin"), verifyEmployee);
 router.patch("/:employeeId/block",  authorize("admin"), blockEmployee);
 router.patch("/:employeeId",        authorize("admin"), updateEmployee);

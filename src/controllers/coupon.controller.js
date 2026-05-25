@@ -55,7 +55,17 @@ export const getCouponById = async (req, res, next) => {
 
 export const updateCoupon = async (req, res, next) => {
   try {
-    const coupon = await Coupon.findByIdAndUpdate(req.params.couponId, req.body, { new: true, runValidators: true });
+    // Whitelist updatable fields — prevents tampering with usedCount/usedBy/code.
+    const ALLOWED = [
+      "discountType", "discountValue", "minimumAmount", "maximumDiscount",
+      "expiryDate", "usageLimit", "visibility", "isActive",
+      "applicableBrands", "applicableCategories", "applicableSubcategories",
+    ];
+    const updates = {};
+    for (const k of ALLOWED) {
+      if (req.body[k] !== undefined) updates[k] = req.body[k];
+    }
+    const coupon = await Coupon.findByIdAndUpdate(req.params.couponId, updates, { new: true, runValidators: true });
     if (!coupon) throw new ApiError(404, "Coupon not found");
     res.json(new ApiResponse(200, { coupon }, "Coupon updated"));
   } catch (err) {

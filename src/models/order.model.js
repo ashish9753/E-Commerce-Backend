@@ -77,6 +77,9 @@ const orderSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+orderSchema.index({ user: 1, createdAt: -1 });
+orderSchema.index({ orderStatus: 1, createdAt: -1 });
+
 orderSchema.pre("save", function (next) {
   if (!this.orderNumber) {
     this.orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 10000)}`;

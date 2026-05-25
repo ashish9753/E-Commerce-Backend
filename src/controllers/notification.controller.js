@@ -5,16 +5,40 @@ import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.u
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { addClient, removeClient, pushToUser } from "../utils/sseClients.js";
-import { verifyAccessToken } from "../utils/jwt.utils.js";
+import crypto from "crypto";
+
+// Short-lived single-use stream tickets — issued to authenticated clients
+// so the long-lived access token never has to appear in the EventSource URL
+// (where it would be exposed to server logs, proxies, etc.).
+const streamTickets = new Map(); // ticket -> { userId, expiresAt }
+const TICKET_TTL_MS = 60_000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [t, v] of streamTickets) if (v.expiresAt < now) streamTickets.delete(t);
+}, 60_000).unref?.();
+
+export const issueStreamTicket = async (req, res, next) => {
+  try {
+    const ticket = crypto.randomBytes(32).toString("hex");
+    streamTickets.set(ticket, {
+      userId: req.user._id.toString(),
+      expiresAt: Date.now() + TICKET_TTL_MS,
+    });
+    res.json(new ApiResponse(200, { ticket, expiresIn: TICKET_TTL_MS / 1000 }));
+  } catch (err) { next(err); }
+};
 
 // SSE: client connects and keeps connection open to receive push events
 export const streamNotifications = async (req, res) => {
   try {
-    // EventSource can't send headers, so token comes as query param
-    const token = req.query.token;
-    if (!token) return res.status(401).end();
-    const decoded = verifyAccessToken(token);
-    const user = await User.findById(decoded._id).select("_id isBlocked");
+    // Exchange a single-use ticket (issued via authenticated POST) for the stream.
+    const ticket = req.query.ticket;
+    if (!ticket || typeof ticket !== "string") return res.status(401).end();
+    const entry = streamTickets.get(ticket);
+    streamTickets.delete(ticket); // single-use
+    if (!entry || entry.expiresAt < Date.now()) return res.status(401).end();
+    const user = await User.findById(entry.userId).select("_id isBlocked");
     if (!user || user.isBlocked) return res.status(401).end();
 
     res.setHeader("Content-Type", "text/event-stream");
