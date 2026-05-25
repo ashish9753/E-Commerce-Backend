@@ -2,8 +2,46 @@ import Cart from "../models/cart.model.js";
 import Product from "../models/product.model.js";
 import Coupon from "../models/coupon.model.js";
 import { validateCouponAudience } from "../utils/couponAudience.utils.js";
+import { computeCouponEligibility } from "../utils/couponEligibility.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+
+// Recompute discountAmount for the cart's currently applied coupon based on the
+// items present right now. If the coupon is no longer valid (expired, audience
+// mismatch, no eligible items left) it's silently dropped — the user gets a
+// fresh chance to re-apply at the next interaction instead of a broken total.
+const reapplyCouponIfAny = async (cart, userId) => {
+  if (!cart.coupon) {
+    cart.discountAmount = 0;
+    return;
+  }
+  const couponId = cart.coupon._id || cart.coupon;
+  const coupon = await Coupon.findById(couponId);
+  if (!coupon) {
+    cart.coupon = null;
+    cart.discountAmount = 0;
+    return;
+  }
+  const validity = coupon.isValid(cart.totalPrice, userId);
+  if (!validity.valid) {
+    cart.coupon = null;
+    cart.discountAmount = 0;
+    return;
+  }
+  const audience = await validateCouponAudience(coupon, userId);
+  if (!audience.valid) {
+    cart.coupon = null;
+    cart.discountAmount = 0;
+    return;
+  }
+  const { applicableAmount, hasRestrictions } = await computeCouponEligibility(coupon, cart.items);
+  if (hasRestrictions && applicableAmount <= 0) {
+    cart.coupon = null;
+    cart.discountAmount = 0;
+    return;
+  }
+  cart.discountAmount = coupon.calculateDiscount(applicableAmount);
+};
 
 const getOrCreateCart = async (userId) => {
   let cart = await Cart.findOne({ user: userId });
@@ -15,14 +53,16 @@ export const getCart = async (req, res, next) => {
   try {
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: "items.product",
-      select: "title price discountPrice images stock isDeleted isPublished",
-    }).populate("coupon", "code discountType discountValue");
+      select: "title price discountPrice images stock isDeleted isPublished brand category",
+    }).populate("coupon", "code discountType discountValue applicableBrands applicableCategories applicableSubcategories");
 
     if (!cart) return res.json(new ApiResponse(200, { cart: { items: [], totalItems: 0, totalPrice: 0, finalPrice: 0 } }));
 
     // Remove deleted/unpublished products
     cart.items = cart.items.filter((item) => item.product && !item.product.isDeleted && item.product.isPublished);
     cart.recalculate();
+    await reapplyCouponIfAny(cart, req.user._id);
+    cart.finalPrice = parseFloat((cart.totalPrice - cart.discountAmount).toFixed(2));
     await cart.save();
 
     res.json(new ApiResponse(200, { cart }));
@@ -128,7 +168,10 @@ export const applyCoupon = async (req, res, next) => {
     const code = normalizeCouponCode(req.body?.code);
     if (!code) throw new ApiError(400, "Invalid coupon code");
 
-    const cart = await Cart.findOne({ user: req.user._id });
+    const cart = await Cart.findOne({ user: req.user._id }).populate(
+      "items.product",
+      "brand category"
+    );
     if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
 
     const coupon = await Coupon.findOne({ code });
@@ -140,7 +183,15 @@ export const applyCoupon = async (req, res, next) => {
     const audience = await validateCouponAudience(coupon, req.user._id);
     if (!audience.valid) throw new ApiError(400, audience.message);
 
-    const discount = coupon.calculateDiscount(cart.totalPrice);
+    // Discount applies only to items matching the coupon's brand/category
+    // restrictions. The minimum-amount check above runs against the full cart;
+    // that's intentional — "spend ₹X to unlock Y% off Brand Z" stays meaningful.
+    const { applicableAmount, hasRestrictions } = await computeCouponEligibility(coupon, cart.items);
+    if (hasRestrictions && applicableAmount <= 0) {
+      throw new ApiError(400, "This coupon is not applicable to any item in your cart");
+    }
+
+    const discount = coupon.calculateDiscount(applicableAmount);
     cart.coupon = coupon._id;
     cart.discountAmount = discount;
     cart.finalPrice = parseFloat((cart.totalPrice - discount).toFixed(2));

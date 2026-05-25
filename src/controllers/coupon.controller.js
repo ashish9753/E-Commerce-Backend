@@ -1,8 +1,10 @@
 import Coupon from "../models/coupon.model.js";
 import Cart from "../models/cart.model.js";
 import Order from "../models/order.model.js";
+import Product from "../models/product.model.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import { validateCouponAudience } from "../utils/couponAudience.utils.js";
+import { computeCouponEligibility } from "../utils/couponEligibility.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
@@ -17,11 +19,11 @@ const normalizeCouponCode = (raw) => {
 
 export const createCoupon = async (req, res, next) => {
   try {
-    const { code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility } = req.body;
+    const { code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility, applicableBrands, applicableCategories, applicableSubcategories } = req.body;
     if (!code || !discountType || !discountValue || !expiryDate) {
       throw new ApiError(400, "code, discountType, discountValue, and expiryDate are required");
     }
-    const coupon = await Coupon.create({ code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility });
+    const coupon = await Coupon.create({ code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility, applicableBrands, applicableCategories, applicableSubcategories });
     res.status(201).json(new ApiResponse(201, { coupon }, "Coupon created"));
   } catch (err) {
     next(err);
@@ -103,21 +105,55 @@ export const validateCoupon = async (req, res, next) => {
     const code = normalizeCouponCode(req.body?.code);
     if (!code) throw new ApiError(400, "Invalid coupon code");
 
-    // Always price against the server cart — never trust a client-supplied amount.
-    const cart = await Cart.findOne({ user: req.user._id });
-    if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
-    const orderAmount = cart.totalPrice;
-
     const coupon = await Coupon.findOne({ code });
     if (!coupon) throw new ApiError(404, "Invalid coupon code");
-
-    const validity = coupon.isValid(orderAmount, req.user._id);
-    if (!validity.valid) throw new ApiError(400, validity.message);
 
     const audience = await validateCouponAudience(coupon, req.user._id);
     if (!audience.valid) throw new ApiError(400, audience.message);
 
-    const discount = coupon.calculateDiscount(orderAmount);
+    // Always price against server-known data — never trust a client-supplied
+    // amount. For Buy Now (directItem), validate against that single product;
+    // otherwise validate against the user's cart.
+    const directItem = req.body?.directItem;
+    let items;
+    let orderAmount;
+
+    if (directItem?.productId) {
+      if (!/^[0-9a-fA-F]{24}$/.test(String(directItem.productId))) {
+        throw new ApiError(400, "Invalid productId");
+      }
+      const qty = parseInt(directItem.quantity, 10);
+      if (!Number.isFinite(qty) || qty < 1 || qty > 50) {
+        throw new ApiError(400, "Quantity must be between 1 and 50");
+      }
+      const product = await Product.findOne({
+        _id: directItem.productId,
+        isDeleted: false,
+        isPublished: true,
+      }).select("brand category price discountPrice");
+      if (!product) throw new ApiError(404, "Product not found");
+      const price = product.discountPrice || product.price;
+      items = [{ product: { brand: product.brand, category: product.category }, price, quantity: qty }];
+      orderAmount = price * qty;
+    } else {
+      const cart = await Cart.findOne({ user: req.user._id }).populate("items.product", "brand category");
+      if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
+      items = cart.items;
+      orderAmount = cart.totalPrice;
+    }
+
+    // Check minimum order against the full cart total.
+    const validity = coupon.isValid(orderAmount, req.user._id);
+    if (!validity.valid) throw new ApiError(400, validity.message);
+
+    const { applicableAmount, hasRestrictions } = await computeCouponEligibility(coupon, items);
+    if (hasRestrictions && applicableAmount <= 0) {
+      throw new ApiError(400, directItem
+        ? "This coupon is not applicable to this product"
+        : "This coupon is not applicable to any item in your cart");
+    }
+
+    const discount = coupon.calculateDiscount(applicableAmount);
     res.json(new ApiResponse(200, {
       discount,
       finalAmount: parseFloat((orderAmount - discount).toFixed(2)),

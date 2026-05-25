@@ -133,8 +133,8 @@ export const updateProduct = async (req, res, next) => {
     const employee = await Employee.findOne({ user: req.user._id });
     if (!employee) throw new ApiError(403, "Employee profile not found");
 
-    const product = await Product.findOne({ _id: req.params.productId, employee: employee._id, isDeleted: false });
-    if (!product) throw new ApiError(404, "Product not found or you don't own it");
+    const product = await Product.findOne({ _id: req.params.productId, isDeleted: false });
+    if (!product) throw new ApiError(404, "Product not found");
 
     // Whitelist updatable fields — prevents tampering with employee, sold, rating, isDeleted, etc.
     const ALLOWED = [
@@ -180,11 +180,8 @@ export const deleteProduct = async (req, res, next) => {
     const employee = await Employee.findOne({ user: req.user._id });
     const isAdmin = req.user.role === "admin";
 
-    const filter = { _id: req.params.productId };
-    if (!isAdmin) filter.employee = employee?._id;
-
-    const product = await Product.findOneAndUpdate(filter, { isDeleted: true }, { new: true });
-    if (!product) throw new ApiError(404, "Product not found or access denied");
+    const product = await Product.findOneAndUpdate({ _id: req.params.productId }, { isDeleted: true }, { new: true });
+    if (!product) throw new ApiError(404, "Product not found");
 
     res.json(new ApiResponse(200, null, "Product deleted"));
   } catch (err) {

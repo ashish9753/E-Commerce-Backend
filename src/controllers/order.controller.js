@@ -3,6 +3,7 @@ import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import User from "../models/user.model.js";
 import Coupon from "../models/coupon.model.js";
+import { computeCouponEligibility } from "../utils/couponEligibility.utils.js";
 import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { sendEmail, orderConfirmationEmail } from "../utils/email.utils.js";
@@ -74,8 +75,12 @@ export const placeOrder = async (req, res, next) => {
       rawItems = [{ product: directItem.productId, quantity: qty }];
     }
 
-    // Build order items with current prices
+    // Build order items with current prices.
+    // We also collect a parallel `itemsForCoupon` list that carries brand +
+    // category — needed so coupon eligibility can be evaluated identically for
+    // Cart and Buy Now paths.
     const orderItems = [];
+    const itemsForCoupon = [];
     let itemsPrice = 0;
     let taxPrice = 0;
     const taxLabelsSet = new Set();
@@ -101,6 +106,11 @@ export const placeOrder = async (req, res, next) => {
         quantity: item.quantity,
         price,
       });
+      itemsForCoupon.push({
+        product: { brand: product.brand, category: product.category },
+        price,
+        quantity: item.quantity,
+      });
     }
 
     taxPrice = parseFloat(taxPrice.toFixed(2));
@@ -110,30 +120,49 @@ export const placeOrder = async (req, res, next) => {
     // Price calculations
     const shippingPrice = itemsPrice >= SHIPPING_THRESHOLD ? 0 : SHIPPING_PRICE;
 
-    // Coupon discount (from cart). We *re-validate* here against the freshly
-    // computed itemsPrice and fail loudly if anything is off — never silently
-    // strip a discount the customer thought they had.
+    // Coupon discount — applies to BOTH Cart and Buy Now flows.
+    // Resolution order:
+    //   1. Explicit `couponCode` in the request body (Buy Now from PDP).
+    //   2. The user's cart-level coupon (cart checkout, or Buy Now without an
+    //      explicit code).
+    // We always re-validate against the actual items being purchased
+    // (`itemsForCoupon`) so the server math is correct regardless of what the
+    // client sent.
     let discountAmount = 0;
     let couponId = null;
 
-    if (useCart) {
-      const cart = await Cart.findOne({ user: user._id });
-      if (cart?.coupon) {
-        const coupon = await Coupon.findById(cart.coupon);
+    let coupon = null;
+    const rawCode = typeof req.body?.couponCode === "string" ? req.body.couponCode.trim().toUpperCase() : null;
+    if (rawCode && /^[A-Z0-9_-]{2,32}$/.test(rawCode)) {
+      coupon = await Coupon.findOne({ code: rawCode });
+      if (!coupon) {
+        throw new ApiError(400, `Coupon "${rawCode}" is not valid.`);
+      }
+    } else {
+      const userCart = await Cart.findOne({ user: user._id });
+      if (userCart?.coupon) {
+        coupon = await Coupon.findById(userCart.coupon);
         if (!coupon) {
           throw new ApiError(400, "The coupon on your cart no longer exists. Please remove it and try again.");
         }
-        const validity = coupon.isValid(itemsPrice, user._id);
-        if (!validity.valid) {
-          throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${validity.message}. Please update your cart.`);
-        }
-        const audience = await validateCouponAudience(coupon, user._id);
-        if (!audience.valid) {
-          throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${audience.message}. Please update your cart.`);
-        }
-        discountAmount = coupon.calculateDiscount(itemsPrice);
-        couponId = coupon._id;
       }
+    }
+
+    if (coupon) {
+      const validity = coupon.isValid(itemsPrice, user._id);
+      if (!validity.valid) {
+        throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${validity.message}.`);
+      }
+      const audience = await validateCouponAudience(coupon, user._id);
+      if (!audience.valid) {
+        throw new ApiError(400, `Coupon "${coupon.code}" cannot be applied: ${audience.message}.`);
+      }
+      const { applicableAmount, hasRestrictions } = await computeCouponEligibility(coupon, itemsForCoupon);
+      if (hasRestrictions && applicableAmount <= 0) {
+        throw new ApiError(400, `Coupon "${coupon.code}" is not applicable to the item(s) you're buying.`);
+      }
+      discountAmount = coupon.calculateDiscount(applicableAmount);
+      couponId = coupon._id;
     }
 
     const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
