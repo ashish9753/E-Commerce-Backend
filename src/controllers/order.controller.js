@@ -298,8 +298,9 @@ export const cancelOrder = async (req, res, next) => {
     const order = await Order.findById(req.params.orderId);
     if (!order) throw new ApiError(404, "Order not found");
 
-    const isOwner = order.user.toString() === req.user._id.toString();
-    if (!isOwner && req.user.role !== "admin") throw new ApiError(403, "Access denied");
+    const isOwner    = order.user.toString() === req.user._id.toString();
+    const isStaff    = req.user.role === "admin" || req.user.role === "employee";
+    if (!isOwner && !isStaff) throw new ApiError(403, "Access denied");
 
     const cancelableStatuses = ["PLACED", "CONFIRMED"];
     if (!cancelableStatuses.includes(order.orderStatus)) {

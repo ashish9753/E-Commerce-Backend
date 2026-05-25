@@ -18,15 +18,29 @@ const orderQueue = new Bull("order-queue", {
 orderQueue.process(1, processOrderJob);
 
 orderQueue.on("completed", (job, result) => {
-  console.log(`Order job ${job.id} completed. OrderId: ${result?.orderId}`);
+  console.log(`[queue] order job ${job.id} completed (orderId=${result?.orderId})`);
 });
 
 orderQueue.on("failed", (job, err) => {
-  console.error(`Order job ${job.id} failed: ${err.message}`);
+  console.error(`[queue] order job ${job.id} failed:`, err.message);
 });
 
 orderQueue.on("stalled", (job) => {
-  console.warn(`Order job ${job.id} stalled`);
+  console.warn(`[queue] order job ${job.id} stalled`);
+});
+
+// Bull's underlying ioredis client surfaces connection issues here.
+// Logging once at WARN keeps the user informed without spamming the console.
+let redisErrorLogged = false;
+orderQueue.on("error", (err) => {
+  if (!redisErrorLogged) {
+    console.error(
+      `[queue] Redis connection error: ${err.message}\n` +
+      `        Queue is configured to use Redis at ${redisConfig.host}:${redisConfig.port}.\n` +
+      `        Start Redis, or set SKIP_QUEUE=true in .env to bypass the queue (dev only).`
+    );
+    redisErrorLogged = true;
+  }
 });
 
 export default orderQueue;

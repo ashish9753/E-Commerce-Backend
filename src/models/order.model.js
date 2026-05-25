@@ -73,6 +73,9 @@ const orderSchema = new mongoose.Schema(
       uploadedBy: { type: String, enum: ['employee', 'admin'], default: 'admin' },
       uploadedAt: { type: Date, default: Date.now },
     }],
+    // Halfway-mark payment reminder for unpaid ONLINE orders. Tracked so the
+    // sweeper sends exactly one reminder per order before auto-cancellation.
+    paymentReminderSentAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

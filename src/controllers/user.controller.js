@@ -65,12 +65,28 @@ export const changePassword = async (req, res, next) => {
   }
 };
 
+// Format validators kept here so add + update apply the same rules.
+const PINCODE_RE = /^\d{6}$/;
+const PHONE_RE   = /^[6-9]\d{9}$/;
+const validateAddressFormats = ({ pincode, phone }) => {
+  if (pincode !== undefined && !PINCODE_RE.test(String(pincode))) {
+    throw new ApiError(400, "Pincode must be exactly 6 digits");
+  }
+  if (phone !== undefined) {
+    const digits = String(phone).replace(/\D/g, "").slice(-10);
+    if (!PHONE_RE.test(digits)) {
+      throw new ApiError(400, "Phone must be a valid 10-digit Indian mobile number");
+    }
+  }
+};
+
 export const addAddress = async (req, res, next) => {
   try {
     const { fullName, phone, pincode, state, city, houseNo, area, landmark } = req.body;
     if (!fullName || !phone || !pincode || !state || !city || !houseNo || !area) {
       throw new ApiError(400, "Required address fields missing");
     }
+    validateAddressFormats({ pincode, phone });
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $push: { addresses: { fullName, phone, pincode, state, city, houseNo, area, landmark } } },
@@ -91,6 +107,7 @@ export const updateAddress = async (req, res, next) => {
     for (const k of ALLOWED) {
       if (typeof req.body?.[k] === "string") sanitized[k] = req.body[k].trim();
     }
+    validateAddressFormats(sanitized);
     const setObj = {};
     for (const [k, v] of Object.entries(sanitized)) {
       setObj[`addresses.$.${k}`] = v;

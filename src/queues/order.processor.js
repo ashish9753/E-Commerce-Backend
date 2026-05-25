@@ -156,13 +156,25 @@ export const processOrderJob = async (job) => {
 
 
     // --- Step 6: In-app notification for customer ---
-    const notifDoc = {
-      user: userId,
-      title: "Order Placed Successfully! 🎉",
-      message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}. We'll notify you as it moves through fulfilment.`,
-      type: "ORDER",
-      link: `/track?id=${order._id}`,
-    };
+    // For unpaid ONLINE orders we surface the deadline + cancel option so the
+    // user understands the order is provisional until payment is verified.
+    const pendingOnline = paymentMethod === "ONLINE";
+    const pendingTimeoutMin = parseInt(process.env.PENDING_ORDER_TIMEOUT_MIN || "30", 10);
+    const notifDoc = pendingOnline
+      ? {
+          user: userId,
+          title: "Order Pending Payment ⏳",
+          message: `Order ${order.orderNumber} (₹${totalPrice}) is awaiting payment. Please complete it within ${pendingTimeoutMin} minutes from My Orders, or cancel the order.`,
+          type: "ORDER",
+          link: `/orders`,
+        }
+      : {
+          user: userId,
+          title: "Order Placed Successfully! 🎉",
+          message: `Your order ${order.orderNumber} has been placed. Total: ₹${totalPrice}. We'll notify you as it moves through fulfilment.`,
+          type: "ORDER",
+          link: `/track?id=${order._id}`,
+        };
     if (session) {
       await Notification.create([notifDoc], { session });
     } else {
@@ -217,7 +229,9 @@ export const processOrderJob = async (job) => {
       await session.abortTransaction();
       session.endSession();
     } else if (decremented.length > 0) {
-      // No-transaction mode (dev / standalone Mongo) — manually roll back stock changes
+      // No-transaction mode (dev / standalone Mongo) — manually roll back stock changes.
+      // If rollback fails the stock is now inconsistent — surface it loudly so it can
+      // be reconciled rather than silently swallowing it.
       try {
         await Product.bulkWrite(
           decremented.map(({ product, quantity }) => ({
@@ -227,7 +241,17 @@ export const processOrderJob = async (job) => {
             },
           }))
         );
-      } catch { /* best-effort */ }
+      } catch (rollbackErr) {
+        console.error(
+          "[queue] CRITICAL: stock rollback failed after order error. " +
+          "Manual reconciliation required for products:",
+          decremented.map(({ product, quantity }) => ({
+            productId: product._id.toString(),
+            quantityToRestore: quantity,
+          })),
+          "Rollback error:", rollbackErr.message
+        );
+      }
     }
     throw err;
   }
