@@ -7,7 +7,7 @@ const router = Router();
 
 router.get("/", getAttributes);
 
-router.use(protect, authorize("admin"));
+router.use(protect, authorize("admin", "employee"));
 router.post("/", createAttribute);
 router.patch("/:attributeId", updateAttribute);
 router.delete("/:attributeId", deleteAttribute);

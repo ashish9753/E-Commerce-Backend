@@ -25,7 +25,9 @@ const ORDER_STATUS_MESSAGES = {
 
 const SHIPPING_THRESHOLD = 500;
 const SHIPPING_PRICE = 50;
-const TAX_RATE = 0.18;
+// Default tax rate when a product doesn't specify one. Set to 0 so untaxed
+// products stay untaxed at checkout; sellers must explicitly set a rate.
+const TAX_RATE = 0;
 
 const VALID_ORDER_STATUSES = [
   "PLACED", "CONFIRMED", "PACKED", "SHIPPED",
@@ -471,7 +473,14 @@ export const getAllOrders = async (req, res, next) => {
       ];
     }
 
-    const [orders, total] = await Promise.all([
+    // Breakdown is computed independent of orderStatus/paymentStatus filters so
+    // the frontend's status tabs can show absolute counts regardless of which
+    // tab is currently active. Other filters (search, userId) are respected.
+    const breakdownFilter = { ...filter };
+    delete breakdownFilter.orderStatus;
+    delete breakdownFilter.paymentStatus;
+
+    const [orders, total, statusAgg, pendingPaymentCount] = await Promise.all([
       Order.find(filter)
         .populate("user", "name email phone")
         .populate("orderItems.product", "title")
@@ -479,9 +488,23 @@ export const getAllOrders = async (req, res, next) => {
         .limit(limit)
         .sort({ createdAt: -1 }),
       Order.countDocuments(filter),
+      Order.aggregate([
+        { $match: breakdownFilter },
+        { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
+      ]),
+      Order.countDocuments({
+        ...breakdownFilter,
+        orderStatus:   "PLACED",
+        paymentMethod: "ONLINE",
+        paymentStatus: "PENDING",
+      }),
     ]);
 
-    res.json(new ApiResponse(200, buildPaginatedResponse(orders, total, page, limit)));
+    res.json(new ApiResponse(200, {
+      ...buildPaginatedResponse(orders, total, page, limit),
+      statusBreakdown:     statusAgg,
+      pendingPaymentCount,
+    }));
   } catch (err) {
     next(err);
   }
@@ -617,7 +640,13 @@ export const getEmployeeOrders = async (req, res, next) => {
 
     const RETURNED_STATUSES = ["RETURNED", "CANCELLED"];
 
-    const [revenueAgg, refundedAgg, statusAgg] = await Promise.all([
+    // Breakdown ignores orderStatus/paymentStatus so the tab counts stay
+    // absolute as the user clicks between status tabs.
+    const breakdownFilter = { ...filter };
+    delete breakdownFilter.orderStatus;
+    delete breakdownFilter.paymentStatus;
+
+    const [revenueAgg, refundedAgg, statusAgg, pendingPaymentCount] = await Promise.all([
       Order.aggregate([
         { $match: { paymentStatus: "PAID", orderStatus: { $nin: RETURNED_STATUSES } } },
         { $group: { _id: null, total: { $sum: "$totalPrice" } } },
@@ -630,8 +659,15 @@ export const getEmployeeOrders = async (req, res, next) => {
         { $group: { _id: null, total: { $sum: "$refundAmount" }, orderTotal: { $sum: "$totalPrice" } } },
       ]),
       Order.aggregate([
+        { $match: breakdownFilter },
         { $group: { _id: "$orderStatus", count: { $sum: 1 } } },
       ]),
+      Order.countDocuments({
+        ...breakdownFilter,
+        orderStatus:   "PLACED",
+        paymentMethod: "ONLINE",
+        paymentStatus: "PENDING",
+      }),
     ]);
 
     const employeeRevenue = revenueAgg[0]?.total || 0;
@@ -644,7 +680,8 @@ export const getEmployeeOrders = async (req, res, next) => {
       ...buildPaginatedResponse(orders, total, page, limit),
       employeeRevenue,
       employeeRefunded,
-      statusBreakdown: statusAgg,
+      statusBreakdown:     statusAgg,
+      pendingPaymentCount,
     }));
   } catch (err) {
     next(err);

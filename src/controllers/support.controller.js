@@ -80,7 +80,8 @@ export const getTicketById = async (req, res, next) => {
     if (!ticket) throw new ApiError(404, "Ticket not found");
 
     const isOwner = ticket.user._id.toString() === req.user._id.toString();
-    if (!isOwner && req.user.role !== "admin") throw new ApiError(403, "Access denied");
+    const isStaff = req.user.role === "admin" || req.user.role === "employee";
+    if (!isOwner && !isStaff) throw new ApiError(403, "Access denied");
 
     res.json(new ApiResponse(200, { ticket }));
   } catch (err) { next(err); }
@@ -96,29 +97,31 @@ export const replyToTicket = async (req, res, next) => {
     if (!ticket) throw new ApiError(404, "Ticket not found");
 
     const isOwner = ticket.user.toString() === req.user._id.toString();
-    const isAdmin = req.user.role === "admin";
-    if (!isOwner && !isAdmin) throw new ApiError(403, "Access denied");
+    const isStaff = req.user.role === "admin" || req.user.role === "employee";
+    if (!isOwner && !isStaff) throw new ApiError(403, "Access denied");
 
     if (["RESOLVED", "CLOSED"].includes(ticket.status)) {
       throw new ApiError(400, "Cannot reply to a resolved or closed ticket");
     }
 
-    // Users must wait for at least one admin reply before they can send more messages
-    if (!isAdmin) {
-      const hasAdminReply = ticket.messages.some(m => m.senderRole === "admin");
-      if (!hasAdminReply) {
+    // Customers must wait for at least one staff reply before sending more messages
+    if (!isStaff) {
+      const hasStaffReply = ticket.messages.some(m => m.senderRole === "admin" || m.senderRole === "employee");
+      if (!hasStaffReply) {
         throw new ApiError(403, "Please wait for our support team to respond before sending another message.");
       }
     }
 
+    // Staff messages render the same way to the customer ("admin" senderRole)
+    // — keeps the customer experience consistent regardless of who answers.
     ticket.messages.push({
       sender:     req.user._id,
-      senderRole: isAdmin ? "admin" : "user",
+      senderRole: isStaff ? "admin" : "user",
       text:       message.trim(),
     });
 
-    // Auto-advance status
-    if (isAdmin && ticket.status === "OPEN") {
+    // Auto-advance status when a staff member first replies
+    if (isStaff && ticket.status === "OPEN") {
       ticket.status = "IN_PROGRESS";
       ticket.assignedAdmin = req.user._id;
     }
@@ -136,14 +139,14 @@ export const replyToTicket = async (req, res, next) => {
       message:  newMessage,
     };
 
-    if (isAdmin) {
+    if (isStaff) {
       // Push chat message to user via SSE — no DB notification for replies
       pushToUser(ticket.user.toString(), msgPayload);
     } else {
-      // Push chat message to all admins via SSE
-      const admins = await User.find({ role: "admin" }).select("_id");
-      admins.forEach(a => pushToUser(a._id.toString(), msgPayload));
-      // DB notification for admin bell only (admins track new replies)
+      // Push chat message to all staff (admins + employees) via SSE
+      const staff = await User.find({ role: { $in: ["admin", "employee"] } }).select("_id");
+      staff.forEach(s => pushToUser(s._id.toString(), msgPayload));
+      // DB notification for admin bell (admins are the primary support owners)
       await notifyAdmins({
         title:   "New Support Reply 💬",
         message: `Customer replied on ticket: "${ticket.subject}"`,

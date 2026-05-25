@@ -4,19 +4,31 @@ import { generateUniqueSlug } from "../utils/slugify.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
+const caseInsensitiveNameRegex = (name) =>
+  new RegExp(`^${name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+
 export const createCategory = async (req, res, next) => {
   try {
     const { name, description, parent } = req.body;
     if (!name) throw new ApiError(400, "Category name is required");
+    const trimmed = name.trim();
+    const existing = await Category.findOne({ name: { $regex: caseInsensitiveNameRegex(trimmed) } });
+    if (existing) {
+      if (existing.isActive) throw new ApiError(409, `Category "${trimmed}" already exists`);
+      existing.isActive = true;
+      if (description) existing.description = description;
+      await existing.save();
+      return res.status(200).json(new ApiResponse(200, { category: existing }, "Category restored"));
+    }
 
-    const slug = await generateUniqueSlug(name, Category);
+    const slug = await generateUniqueSlug(trimmed, Category);
     let image;
     if (req.file) {
       const result = await uploadToCloudinary(req.file.buffer, "ecommerce/categories");
       image = result.secure_url;
     }
 
-    const category = await Category.create({ name, slug, description, parent: parent || null, image });
+    const category = await Category.create({ name: trimmed, slug, description, parent: parent || null, image });
     res.status(201).json(new ApiResponse(201, { category }, "Category created"));
   } catch (err) {
     next(err);
@@ -51,8 +63,14 @@ export const updateCategory = async (req, res, next) => {
     const updates = { description, parent, isActive };
 
     if (name) {
-      updates.name = name;
-      updates.slug = await generateUniqueSlug(name, Category, req.params.categoryId);
+      const trimmed = name.trim();
+      const existing = await Category.findOne({
+        name: { $regex: caseInsensitiveNameRegex(trimmed) },
+        _id: { $ne: req.params.categoryId },
+      });
+      if (existing) throw new ApiError(409, `Category "${trimmed}" already exists`);
+      updates.name = trimmed;
+      updates.slug = await generateUniqueSlug(trimmed, Category, req.params.categoryId);
     }
     if (req.file) {
       const result = await uploadToCloudinary(req.file.buffer, "ecommerce/categories");

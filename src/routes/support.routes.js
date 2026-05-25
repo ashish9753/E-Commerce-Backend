@@ -18,14 +18,14 @@ router.use(protect);
 router.post("/", createTicket);
 router.get("/my", getMyTickets);
 
-// Admin route
-router.get("/", authorize("admin"), getAllTickets);
+// Staff route — admin + employee can both view all tickets
+router.get("/", authorize("admin", "employee"), getAllTickets);
 
 // Shared (ownership check inside controller)
 router.get("/:ticketId", getTicketById);
 router.post("/:ticketId/reply", replyToTicket);
 
-// Admin only
-router.patch("/:ticketId/status", authorize("admin"), updateTicketStatus);
+// Staff only — admin + employee can update status
+router.patch("/:ticketId/status", authorize("admin", "employee"), updateTicketStatus);
 
 export default router;

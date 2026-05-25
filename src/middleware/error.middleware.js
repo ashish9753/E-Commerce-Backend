@@ -25,7 +25,9 @@ export const errorHandler = (err, req, res, next) => {
     } else if (error.code === 11000) {
       statusCode = 409;
       const field = Object.keys(error.keyValue)[0];
-      message = `Duplicate value for field: ${field}`;
+      const value = Object.values(error.keyValue)[0];
+      const fieldLabel = field.charAt(0).toUpperCase() + field.slice(1);
+      message = `"${value}" already exists. Please use a different ${fieldLabel}.`;
     } else if (error.name === "ValidationError") {
       statusCode = 400;
       message = Object.values(error.errors).map((e) => e.message).join(", ");

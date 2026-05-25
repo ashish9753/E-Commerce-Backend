@@ -12,7 +12,7 @@ export const createProduct = async (req, res, next) => {
     const employee = await Employee.findOne({ user: req.user._id, isVerified: true });
     if (!employee) throw new ApiError(403, "Only verified employees can create products");
 
-    const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured, returnable, returnWindow } = req.body;
+    const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured, returnable, returnWindow, taxRate, taxLabel } = req.body;
     if (!title || !description || !category || !price) {
       throw new ApiError(400, "title, description, category, and price are required");
     }
@@ -27,6 +27,12 @@ export const createProduct = async (req, res, next) => {
       images = uploads.map((r) => r.secure_url);
     }
 
+    // Tax — explicitly saved from the form so the schema default isn't silently
+    // overridden later. If the seller didn't pick a rate, falls back to 0% / "No Tax".
+    const parsedTaxRate = taxRate === undefined || taxRate === null || taxRate === ""
+      ? 0
+      : Math.max(0, Math.min(100, parseFloat(taxRate) || 0));
+
     const product = await Product.create({
       employee: employee._id,
       title, slug, description, shortDescription, category, brand, sku,
@@ -38,6 +44,8 @@ export const createProduct = async (req, res, next) => {
       isFeatured:   isFeatured === "true" || isFeatured === true,
       returnable:   returnable === false || returnable === "false" ? false : true,
       returnWindow: [7, 10].includes(parseInt(returnWindow)) ? parseInt(returnWindow) : 7,
+      taxRate:      parsedTaxRate,
+      taxLabel:     (typeof taxLabel === "string" && taxLabel.trim()) || (parsedTaxRate > 0 ? "GST" : "No Tax"),
       images,
     });
 

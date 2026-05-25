@@ -12,7 +12,7 @@ const router = Router();
 router.get("/", getAllCategories);
 router.get("/:slug", getCategoryBySlug);
 
-router.use(protect, authorize("admin"));
+router.use(protect, authorize("admin", "employee"));
 router.post("/", uploadSingle("image"), createCategory);
 router.patch("/:categoryId", uploadSingle("image"), updateCategory);
 router.delete("/:categoryId", deleteCategory);

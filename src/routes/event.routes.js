@@ -8,7 +8,7 @@ const router = Router();
 
 router.get("/", getAllEvents);
 
-router.use(protect, authorize("admin"));
+router.use(protect, authorize("admin", "employee"));
 router.post("/", uploadSingle("image"), createEvent);
 router.patch("/:eventId", uploadSingle("image"), updateEvent);
 router.delete("/:eventId", deleteEvent);
