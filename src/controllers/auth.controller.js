@@ -1,31 +1,29 @@
 import crypto from "crypto";
 import User from "../models/user.model.js";
-import { generateTokenPair, verifyRefreshToken } from "../utils/jwt.utils.js";
+import { generateTokenPair, verifyRefreshToken, getRefreshCookieMaxAge } from "../utils/jwt.utils.js";
 import { sendEmail, passwordResetEmail } from "../utils/email.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 
 const REFRESH_COOKIE = "refreshToken";
-// 7 days, matches REFRESH_TOKEN_EXPIRY default in jwt.utils.js.
-const REFRESH_COOKIE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 
 // httpOnly so XSS can't read the refresh token from JS. sameSite=lax is enough
 // in dev (frontend proxies through the same origin); in prod over HTTPS the
 // `secure` flag flips on automatically.
-const refreshCookieOptions = () => ({
+const refreshCookieOptions = (role) => ({
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
   sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-  maxAge: REFRESH_COOKIE_MAX_AGE,
+  maxAge: getRefreshCookieMaxAge(role),
   path: "/api/v1/auth",
 });
 
-const setRefreshCookie = (res, token) => {
-  res.cookie(REFRESH_COOKIE, token, refreshCookieOptions());
+const setRefreshCookie = (res, token, role) => {
+  res.cookie(REFRESH_COOKIE, token, refreshCookieOptions(role));
 };
 
 const clearRefreshCookie = (res) => {
-  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieOptions(), maxAge: undefined });
+  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieOptions("user"), maxAge: undefined });
 };
 
 export const register = async (req, res, next) => {
@@ -55,7 +53,7 @@ export const register = async (req, res, next) => {
     delete userObj.password;
     delete userObj.refreshToken;
 
-    setRefreshCookie(res, refreshToken);
+    setRefreshCookie(res, refreshToken, user.role);
     res.status(201).json(
       new ApiResponse(201, { user: userObj, accessToken }, "Registration successful")
     );
@@ -84,7 +82,7 @@ export const login = async (req, res, next) => {
     delete userObj.password;
     delete userObj.refreshToken;
 
-    setRefreshCookie(res, refreshToken);
+    setRefreshCookie(res, refreshToken, user.role);
     res.json(new ApiResponse(200, { user: userObj, accessToken }, "Login successful"));
   } catch (err) {
     next(err);
@@ -110,7 +108,7 @@ export const refreshToken = async (req, res, next) => {
     user.refreshToken = newRefreshToken;
     await user.save({ validateBeforeSave: false });
 
-    setRefreshCookie(res, newRefreshToken);
+    setRefreshCookie(res, newRefreshToken, user.role);
     res.json(new ApiResponse(200, { accessToken }, "Tokens refreshed"));
   } catch (err) {
     if (err.name === "JsonWebTokenError" || err.name === "TokenExpiredError") {
