@@ -1,5 +1,4 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
 import {
   register, login, logout, refreshToken,
   forgotPassword, resetPassword, getMe,
@@ -9,20 +8,18 @@ import { protect } from "../middleware/auth.middleware.js";
 
 const router = Router();
 
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many auth attempts, please try again in 15 minutes." },
-});
+// Rate limiting intentionally disabled here. Behind Render's edge proxy every
+// request appears to come from the same IP, so a per-IP limiter collapses to
+// a single global bucket and locks everyone out. When you re-enable, make
+// sure app.js sets `app.set('trust proxy', 1)` so the limiter sees the real
+// client IP from X-Forwarded-For first.
 
-router.post("/register", authLimiter, register);
-router.post("/login", authLimiter, login);
-router.post("/google", authLimiter, googleAuth);
-router.post("/google/complete", authLimiter, googleRegister);
+router.post("/register", register);
+router.post("/login", login);
+router.post("/google", googleAuth);
+router.post("/google/complete", googleRegister);
 router.post("/refresh-token", refreshToken);
-router.post("/forgot-password", authLimiter, forgotPassword);
+router.post("/forgot-password", forgotPassword);
 router.patch("/reset-password/:token", resetPassword);
 router.post("/logout", protect, logout);
 router.get("/me", protect, getMe);

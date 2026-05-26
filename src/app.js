@@ -12,6 +12,12 @@ import routes from "./routes/index.js";
 
 const app = express();
 
+// We're deployed behind Render's edge proxy, which adds X-Forwarded-For. Tell
+// Express to trust the first hop so `req.ip` is the real client IP, not the
+// proxy's. Without this, rate limiters, IP logging, and secure-cookie
+// detection all see a single shared upstream IP for every request.
+app.set("trust proxy", 1);
+
 app.use(helmet());
 
 // Allowed browser origins. Accepts a comma-separated list in CLIENT_URL so
