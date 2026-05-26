@@ -32,9 +32,15 @@ const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    phone: { type: String, required: true },
-    password: { type: String, required: true, select: false },
+    phone: { type: String },
+    // Password is optional so Google-only users (who skip the password step)
+    // can still register. Email/password login requires the field to exist.
+    password: { type: String, select: false },
     profileImage: String,
+    // Google sign-in linkage. Sparse so multiple non-Google users don't collide
+    // on null. Unique so the same Google account can't bind to two users.
+    googleId: { type: String, unique: true, sparse: true, index: true },
+    emailVerified: { type: Boolean, default: false },
     role: { type: String, enum: ["user", "admin", "employee"], default: "user" },
     addresses: [addressSchema],
     savedRefundDetails: savedRefundDetailsSchema,
@@ -57,6 +63,9 @@ userSchema.pre("save", async function (next) {
 });
 
 userSchema.methods.comparePassword = async function (candidatePassword) {
+  // Google-only users have no password — fail comparison cleanly instead of bcrypt
+  // throwing on undefined.
+  if (!this.password) return false;
   return bcrypt.compare(candidatePassword, this.password);
 };
 

@@ -1,9 +1,53 @@
 import crypto from "crypto";
+import { OAuth2Client } from "google-auth-library";
 import User from "../models/user.model.js";
 import { generateTokenPair, verifyRefreshToken, getRefreshCookieMaxAge } from "../utils/jwt.utils.js";
 import { sendEmail, passwordResetEmail } from "../utils/email.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+
+// Single OAuth2Client used to verify Google ID tokens against our client_id.
+// Re-uses Google's public keys cache so we don't refetch JWKS on every request.
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+const verifyGoogleIdToken = async (idToken) => {
+  if (!idToken) throw new ApiError(400, "Google ID token is required");
+  if (!process.env.GOOGLE_CLIENT_ID) {
+    throw new ApiError(500, "Google sign-in is not configured on the server");
+  }
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload?.email_verified) {
+      throw new ApiError(401, "Google account email is not verified");
+    }
+    return {
+      googleId: payload.sub,
+      email: payload.email.toLowerCase(),
+      name: payload.name || payload.email.split("@")[0],
+      picture: payload.picture,
+    };
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    throw new ApiError(401, "Invalid or expired Google token");
+  }
+};
+
+const issueSessionForUser = async (res, user) => {
+  if (user.isBlocked) throw new ApiError(403, "Your account has been blocked");
+  const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);
+  user.refreshToken = refreshToken;
+  user.lastLogin = new Date();
+  await user.save({ validateBeforeSave: false });
+  const userObj = user.toObject();
+  delete userObj.password;
+  delete userObj.refreshToken;
+  setRefreshCookie(res, refreshToken, user.role);
+  return { user: userObj, accessToken };
+};
 
 const REFRESH_COOKIE = "refreshToken";
 
@@ -185,6 +229,95 @@ export const resetPassword = async (req, res, next) => {
 export const getMe = async (req, res, next) => {
   try {
     res.json(new ApiResponse(200, { user: req.user }));
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * Step 1 of Google sign-in. Verify the ID token from the client.
+ *  - If a user with this email/googleId already exists → log them in directly.
+ *  - Otherwise return the verified profile so the frontend can show a
+ *    "complete your profile" form. We do NOT create the user here, because
+ *    we still need phone/password from them before the account is usable.
+ */
+export const googleAuth = async (req, res, next) => {
+  try {
+    const { idToken } = req.body;
+    const profile = await verifyGoogleIdToken(idToken);
+
+    // Match by googleId first, then by verified email (handles users who
+    // originally signed up with email/password and are now linking Google).
+    let user = await User.findOne({
+      $or: [{ googleId: profile.googleId }, { email: profile.email }],
+    }).select("+refreshToken");
+
+    if (user) {
+      // Link Google if it wasn't linked before. Email coming from Google is
+      // verified, so we can mark emailVerified=true on existing accounts too.
+      let dirty = false;
+      if (!user.googleId) { user.googleId = profile.googleId; dirty = true; }
+      if (!user.emailVerified) { user.emailVerified = true; dirty = true; }
+      if (!user.profileImage && profile.picture) { user.profileImage = profile.picture; dirty = true; }
+      if (dirty) await user.save({ validateBeforeSave: false });
+
+      const session = await issueSessionForUser(res, user);
+      return res.json(new ApiResponse(200, { ...session, needsRegistration: false }, "Logged in with Google"));
+    }
+
+    // New user — frontend will show the completion form. We send back the
+    // verified profile (and echo the idToken so the next call can re-verify
+    // server-side; we never trust the email coming straight from req.body).
+    return res.json(new ApiResponse(200, {
+      needsRegistration: true,
+      profile: { email: profile.email, name: profile.name, picture: profile.picture },
+    }, "Google verified. Please complete your profile."));
+  } catch (err) {
+    next(err);
+  }
+};
+
+/**
+ * Step 2 of Google sign-in for new users. Re-verifies the idToken so we never
+ * trust the email field from req.body, then creates the user with the
+ * profile fields they filled in (phone + optional password).
+ */
+export const googleRegister = async (req, res, next) => {
+  try {
+    const { idToken, name, phone, password } = req.body;
+    const profile = await verifyGoogleIdToken(idToken);
+
+    if (!name || !name.trim()) throw new ApiError(400, "Name is required");
+    if (!phone || !phone.trim()) throw new ApiError(400, "Phone number is required");
+    if (password && password.length < 8) {
+      throw new ApiError(400, "Password must be at least 8 characters");
+    }
+
+    // Guard against the race where a user signed up between googleAuth and
+    // googleRegister — fall back to logging them in.
+    const existing = await User.findOne({
+      $or: [{ googleId: profile.googleId }, { email: profile.email }],
+    }).select("+refreshToken");
+    if (existing) {
+      if (!existing.googleId) existing.googleId = profile.googleId;
+      existing.emailVerified = true;
+      const session = await issueSessionForUser(res, existing);
+      return res.json(new ApiResponse(200, { ...session, needsRegistration: false }, "Logged in with Google"));
+    }
+
+    const user = await User.create({
+      name: name.trim(),
+      email: profile.email,            // verified — comes from the Google token, not the body
+      phone: phone.trim(),
+      password: password || undefined, // optional; Google-only users can leave it blank
+      googleId: profile.googleId,
+      emailVerified: true,
+      profileImage: profile.picture,
+      role: "user",
+    });
+
+    const session = await issueSessionForUser(res, user);
+    res.status(201).json(new ApiResponse(201, { ...session, needsRegistration: false }, "Registration successful"));
   } catch (err) {
     next(err);
   }

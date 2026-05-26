@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import {
   register, login, logout, refreshToken,
   forgotPassword, resetPassword, getMe,
+  googleAuth, googleRegister,
 } from "../controllers/auth.controller.js";
 import { protect } from "../middleware/auth.middleware.js";
 
@@ -18,6 +19,8 @@ const authLimiter = rateLimit({
 
 router.post("/register", authLimiter, register);
 router.post("/login", authLimiter, login);
+router.post("/google", authLimiter, googleAuth);
+router.post("/google/complete", authLimiter, googleRegister);
 router.post("/refresh-token", refreshToken);
 router.post("/forgot-password", authLimiter, forgotPassword);
 router.patch("/reset-password/:token", resetPassword);

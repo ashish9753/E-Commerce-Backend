@@ -22,7 +22,7 @@ export const createCategory = async (req, res, next) => {
     }
 
     const slug = await generateUniqueSlug(trimmed, Category);
-    let image;
+    let image = req.body.imageUrl || undefined;
     if (req.file) {
       const result = await uploadToCloudinary(req.file.buffer, "ecommerce/categories");
       image = result.secure_url;
@@ -59,8 +59,9 @@ export const getCategoryBySlug = async (req, res, next) => {
 
 export const updateCategory = async (req, res, next) => {
   try {
-    const { name, description, parent, isActive } = req.body;
+    const { name, description, parent, isActive, imageUrl } = req.body;
     const updates = { description, parent, isActive };
+    if (imageUrl) updates.image = imageUrl;
 
     if (name) {
       const trimmed = name.trim();

@@ -24,8 +24,9 @@ export const getAttributes = async (req, res, next) => {
 
 export const updateAttribute = async (req, res, next) => {
   try {
-    const { name, unit, options, isActive } = req.body;
+    const { name, unit, subcategory, options, isActive } = req.body;
     const updates = { name, unit, isActive };
+    if (subcategory) updates.subcategory = subcategory;
     if (options !== undefined) {
       updates.options = Array.isArray(options) ? options : options.split(",").map(s => s.trim()).filter(Boolean);
     }
