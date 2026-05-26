@@ -13,8 +13,32 @@ import routes from "./routes/index.js";
 const app = express();
 
 app.use(helmet());
+
+// Allowed browser origins. Accepts a comma-separated list in CLIENT_URL so
+// the same backend can serve local dev, the Render-hosted frontend, and any
+// future preview deploys without code changes. The Render frontend is baked
+// in as a safe default so a missing/typo'd env var doesn't take prod down.
+//
+// `credentials: true` requires an exact origin echo (no wildcards), which is
+// why we match against an allowlist and return the caller's own Origin.
+const DEFAULT_ALLOWED_ORIGINS = [
+  "http://localhost:3000",
+  "https://e-commerce-frontend-9vtd.onrender.com",
+];
+const ALLOWED_ORIGINS = (process.env.CLIENT_URL || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .concat(DEFAULT_ALLOWED_ORIGINS);
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || "http://localhost:3000",
+  origin: (origin, cb) => {
+    // Non-browser callers (curl, server-to-server, health checks) have no
+    // Origin header — let them through.
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
   credentials: true,
 }));
 app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev"));
