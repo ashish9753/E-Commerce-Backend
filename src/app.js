@@ -48,24 +48,9 @@ app.use(cookieParser());
 app.use(mongoSanitize);
 app.use(hpp());
 
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 500,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many requests, please try again later." },
-});
-app.use("/api", limiter);
-
-// Stricter limiter for auth endpoints (login, register, forgot/reset password)
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many auth attempts, please try again later." },
-});
-app.use("/api/v1/auth", authLimiter);
+// Rate limiting disabled for development
+// const limiter = rateLimit({ windowMs: 15*60*1000, max: 500, ... });
+// const authLimiter = rateLimit({ windowMs: 15*60*1000, max: 20, ... });
 
 app.get("/health", (req, res) => res.json({ status: "OK", timestamp: new Date() }));
 
