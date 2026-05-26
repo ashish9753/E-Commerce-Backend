@@ -3,7 +3,6 @@ import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import cookieParser from "cookie-parser";
-import rateLimit from "express-rate-limit";
 import hpp from "hpp";
 
 import { errorHandler, notFound } from "./middleware/error.middleware.js";
@@ -53,10 +52,6 @@ app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(cookieParser());
 app.use(mongoSanitize);
 app.use(hpp());
-
-// Rate limiting disabled for development
-// const limiter = rateLimit({ windowMs: 15*60*1000, max: 500, ... });
-// const authLimiter = rateLimit({ windowMs: 15*60*1000, max: 20, ... });
 
 app.get("/health", (req, res) => res.json({ status: "OK", timestamp: new Date() }));
 

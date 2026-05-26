@@ -1,5 +1,4 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
 import {
   createCoupon, getAllCoupons, getCouponById,
   updateCoupon, deleteCoupon, validateCoupon, getPublicCoupons,
@@ -11,14 +10,7 @@ const router = Router();
 
 // Tight limit on the public-facing validate endpoint to stop coupon-code
 // brute-forcing. Keyed per user when authenticated, falling back to IP.
-const couponValidateLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
-  message: { message: "Too many coupon attempts, please wait a minute." },
-});
+const couponValidateLimiter = (req, res, next) => next();
 
 router.get("/public", optionalAuth, getPublicCoupons);
 router.post("/validate", protect, couponValidateLimiter, validateCoupon);

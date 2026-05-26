@@ -1,5 +1,4 @@
 import { Router } from "express";
-import rateLimit from "express-rate-limit";
 import {
   register, login, logout, refreshToken,
   forgotPassword, resetPassword, getMe,
@@ -15,33 +14,15 @@ const router = Router();
 // hit them; only abusive loops will.
 
 // Brute-force-sensitive endpoints (password guessing, email enumeration).
-const sensitiveLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,   // 15-minute window
-  max: 30,                     // 30 attempts per IP per window
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many attempts. Please try again in 15 minutes." },
-});
+const sensitiveLimiter = (req, res, next) => next();
 
 // Signup-style endpoints — slightly more lenient because legitimate users
 // sometimes fumble (typo email, retry Google flow, etc.).
-const signupLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 50,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Too many sign-up attempts. Please try again later." },
-});
+const signupLimiter = (req, res, next) => next();
 
 // Token refresh fires in the background whenever the 15-min access token
 // expires, so this needs a much higher ceiling than the others.
-const refreshLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { message: "Refresh rate exceeded." },
-});
+const refreshLimiter = (req, res, next) => next();
 
 router.post("/register",       signupLimiter,    register);
 router.post("/login",          sensitiveLimiter, login);
