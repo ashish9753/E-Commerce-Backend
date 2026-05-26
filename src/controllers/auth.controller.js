@@ -36,7 +36,7 @@ const verifyGoogleIdToken = async (idToken) => {
   }
 };
 
-const issueSessionForUser = async (res, user) => {
+const issueSessionForUser = async (req, res, user) => {
   if (user.isBlocked) throw new ApiError(403, "Your account has been blocked");
   const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);
   user.refreshToken = refreshToken;
@@ -45,29 +45,40 @@ const issueSessionForUser = async (res, user) => {
   const userObj = user.toObject();
   delete userObj.password;
   delete userObj.refreshToken;
-  setRefreshCookie(res, refreshToken, user.role);
+  setRefreshCookie(req, res, refreshToken, user.role);
   return { user: userObj, accessToken };
 };
 
 const REFRESH_COOKIE = "refreshToken";
 
-// httpOnly so XSS can't read the refresh token from JS. sameSite=lax is enough
-// in dev (frontend proxies through the same origin); in prod over HTTPS the
-// `secure` flag flips on automatically.
-const refreshCookieOptions = (role) => ({
-  httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-  maxAge: getRefreshCookieMaxAge(role),
-  path: "/api/v1/auth",
-});
-
-const setRefreshCookie = (res, token, role) => {
-  res.cookie(REFRESH_COOKIE, token, refreshCookieOptions(role));
+// Cookie attributes are derived from the live request, not NODE_ENV, so the
+// cookie always matches the connection. Why this matters:
+//
+//   * Cross-site fetch (frontend on Render, backend on Render — different
+//     hostnames) only carries cookies if SameSite=None AND Secure.
+//   * Modern browsers reject Secure cookies on plain http:// (except
+//     localhost), so we must NOT set Secure on http requests.
+//
+// `req.secure` works correctly because app.js sets `trust proxy: 1` — the
+// flag reads `X-Forwarded-Proto` from Render's edge. If env var slips out of
+// sync (no NODE_ENV=production set) cookies still work.
+const refreshCookieOptions = (req, role) => {
+  const isHttps = !!(req?.secure || process.env.NODE_ENV === "production");
+  return {
+    httpOnly: true,                          // not readable from JS — XSS-safe
+    secure: isHttps,                         // browser will reject otherwise
+    sameSite: isHttps ? "none" : "lax",      // None+Secure for cross-site
+    maxAge: getRefreshCookieMaxAge(role),
+    path: "/api/v1/auth",
+  };
 };
 
-const clearRefreshCookie = (res) => {
-  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieOptions("user"), maxAge: undefined });
+const setRefreshCookie = (req, res, token, role) => {
+  res.cookie(REFRESH_COOKIE, token, refreshCookieOptions(req, role));
+};
+
+const clearRefreshCookie = (req, res) => {
+  res.clearCookie(REFRESH_COOKIE, { ...refreshCookieOptions(req, "user"), maxAge: undefined });
 };
 
 export const register = async (req, res, next) => {
@@ -97,7 +108,7 @@ export const register = async (req, res, next) => {
     delete userObj.password;
     delete userObj.refreshToken;
 
-    setRefreshCookie(res, refreshToken, user.role);
+    setRefreshCookie(req, res, refreshToken, user.role);
     res.status(201).json(
       new ApiResponse(201, { user: userObj, accessToken }, "Registration successful")
     );
@@ -126,7 +137,7 @@ export const login = async (req, res, next) => {
     delete userObj.password;
     delete userObj.refreshToken;
 
-    setRefreshCookie(res, refreshToken, user.role);
+    setRefreshCookie(req, res, refreshToken, user.role);
     res.json(new ApiResponse(200, { user: userObj, accessToken }, "Login successful"));
   } catch (err) {
     next(err);
@@ -144,7 +155,7 @@ export const refreshToken = async (req, res, next) => {
     const user = await User.findById(decoded._id).select("+refreshToken");
 
     if (!user || user.refreshToken !== token) {
-      clearRefreshCookie(res);
+      clearRefreshCookie(req, res);
       throw new ApiError(401, "Invalid or expired refresh token");
     }
 
@@ -152,11 +163,11 @@ export const refreshToken = async (req, res, next) => {
     user.refreshToken = newRefreshToken;
     await user.save({ validateBeforeSave: false });
 
-    setRefreshCookie(res, newRefreshToken, user.role);
+    setRefreshCookie(req, res, newRefreshToken, user.role);
     res.json(new ApiResponse(200, { accessToken }, "Tokens refreshed"));
   } catch (err) {
     if (err.name === "JsonWebTokenError" || err.name === "TokenExpiredError") {
-      clearRefreshCookie(res);
+      clearRefreshCookie(req, res);
       return next(new ApiError(401, "Invalid or expired refresh token"));
     }
     next(err);
@@ -166,7 +177,7 @@ export const refreshToken = async (req, res, next) => {
 export const logout = async (req, res, next) => {
   try {
     await User.findByIdAndUpdate(req.user._id, { refreshToken: null });
-    clearRefreshCookie(res);
+    clearRefreshCookie(req, res);
     res.json(new ApiResponse(200, null, "Logged out successfully"));
   } catch (err) {
     next(err);
@@ -261,7 +272,7 @@ export const googleAuth = async (req, res, next) => {
       if (!user.profileImage && profile.picture) { user.profileImage = profile.picture; dirty = true; }
       if (dirty) await user.save({ validateBeforeSave: false });
 
-      const session = await issueSessionForUser(res, user);
+      const session = await issueSessionForUser(req, res, user);
       return res.json(new ApiResponse(200, { ...session, needsRegistration: false }, "Logged in with Google"));
     }
 
@@ -301,7 +312,7 @@ export const googleRegister = async (req, res, next) => {
     if (existing) {
       if (!existing.googleId) existing.googleId = profile.googleId;
       existing.emailVerified = true;
-      const session = await issueSessionForUser(res, existing);
+      const session = await issueSessionForUser(req, res, existing);
       return res.json(new ApiResponse(200, { ...session, needsRegistration: false }, "Logged in with Google"));
     }
 
@@ -316,7 +327,7 @@ export const googleRegister = async (req, res, next) => {
       role: "user",
     });
 
-    const session = await issueSessionForUser(res, user);
+    const session = await issueSessionForUser(req, res, user);
     res.status(201).json(new ApiResponse(201, { ...session, needsRegistration: false }, "Registration successful"));
   } catch (err) {
     next(err);
