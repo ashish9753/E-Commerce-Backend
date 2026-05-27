@@ -10,6 +10,7 @@ const eventSchema = new mongoose.Schema(
     endDate:         { type: Date, required: true },
     image:           String,
     isActive:        { type: Boolean, default: true },
+    coupon:          { type: mongoose.Schema.Types.ObjectId, ref: "Coupon" },
   },
   { timestamps: true }
 );

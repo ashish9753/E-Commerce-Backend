@@ -9,8 +9,16 @@ import ApiResponse from "../utils/ApiResponse.js";
 
 export const createProduct = async (req, res, next) => {
   try {
-    const employee = await Employee.findOne({ user: req.user._id, isVerified: true });
-    if (!employee) throw new ApiError(403, "Only verified employees can create products");
+    let employee;
+    if (req.user.role === "admin") {
+      // Admin must specify which employee/seller owns this product
+      if (!req.body.employee) throw new ApiError(400, "employee (seller) is required when admin creates a product");
+      employee = await Employee.findById(req.body.employee);
+      if (!employee) throw new ApiError(404, "Selected employee not found");
+    } else {
+      employee = await Employee.findOne({ user: req.user._id, isVerified: true });
+      if (!employee) throw new ApiError(403, "Only verified employees can create products");
+    }
 
     const { title, description, shortDescription, category, brand, sku, price, discountPrice, stock, tags, specifications, isFeatured, returnable, returnWindow, taxRate, taxLabel } = req.body;
     if (!title || !description || !category || !price) {
@@ -138,18 +146,21 @@ export const getProductById = async (req, res, next) => {
 
 export const updateProduct = async (req, res, next) => {
   try {
-    const employee = await Employee.findOne({ user: req.user._id });
-    if (!employee) throw new ApiError(403, "Employee profile not found");
+    if (req.user.role !== "admin") {
+      const employee = await Employee.findOne({ user: req.user._id });
+      if (!employee) throw new ApiError(403, "Employee profile not found");
+    }
 
     const product = await Product.findOne({ _id: req.params.productId, isDeleted: false });
     if (!product) throw new ApiError(404, "Product not found");
 
-    // Whitelist updatable fields — prevents tampering with employee, sold, rating, isDeleted, etc.
+    // Whitelist updatable fields — prevents tampering with sold, rating, isDeleted, etc.
     const ALLOWED = [
       "title", "description", "shortDescription", "category", "brand", "sku",
       "price", "discountPrice", "stock", "tags", "specifications",
       "isFeatured", "isPublished", "returnable", "returnWindow", "taxRate", "taxLabel",
       "keepImages",
+      ...(req.user.role === "admin" ? ["employee"] : []),
     ];
     const updates = {};
     for (const k of ALLOWED) {

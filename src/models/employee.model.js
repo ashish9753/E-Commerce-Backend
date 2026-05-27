@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { DEFAULT_PERMISSIONS } from "../middleware/permission.middleware.js";
 
 const employeeSchema = new mongoose.Schema(
   {
@@ -19,6 +20,9 @@ const employeeSchema = new mongoose.Schema(
     department:     String,
     joiningDate:    Date,
     monthlySalary:  { type: Number, default: 0 },
+    // Per-employee permission keys controlling sidebar tabs and write actions.
+    // Default = full access so existing employees keep working.
+    permissions:    { type: [String], default: () => DEFAULT_PERMISSIONS },
   },
   { timestamps: true }
 );

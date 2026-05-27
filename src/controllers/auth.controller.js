@@ -5,6 +5,7 @@ import { generateTokenPair, verifyRefreshToken, getRefreshCookieMaxAge } from ".
 import { sendEmail, passwordResetEmail } from "../utils/email.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { assertPhone } from "../utils/validators.utils.js";
 
 // Single OAuth2Client used to verify Google ID tokens against our client_id.
 // Re-uses Google's public keys cache so we don't refetch JWKS on every request.
@@ -89,6 +90,7 @@ export const register = async (req, res, next) => {
       throw new ApiError(400, "All fields are required");
     }
     if (password.length < 8) throw new ApiError(400, "Password must be at least 8 characters");
+    const phoneDigits = assertPhone(phone);
 
     const existingUser = await User.findOne({ email });
     if (existingUser) throw new ApiError(409, "Email already registered");
@@ -96,7 +98,7 @@ export const register = async (req, res, next) => {
     const user = await User.create({
       name,
       email,
-      phone,
+      phone: phoneDigits,
       password,
       role: "user",
     });
@@ -299,7 +301,7 @@ export const googleRegister = async (req, res, next) => {
     const profile = await verifyGoogleIdToken(idToken);
 
     if (!name || !name.trim()) throw new ApiError(400, "Name is required");
-    if (!phone || !phone.trim()) throw new ApiError(400, "Phone number is required");
+    const phoneDigits = assertPhone(phone);
     if (password && password.length < 8) {
       throw new ApiError(400, "Password must be at least 8 characters");
     }
@@ -319,7 +321,7 @@ export const googleRegister = async (req, res, next) => {
     const user = await User.create({
       name: name.trim(),
       email: profile.email,            // verified — comes from the Google token, not the body
-      phone: phone.trim(),
+      phone: phoneDigits,
       password: password || undefined, // optional; Google-only users can leave it blank
       googleId: profile.googleId,
       emailVerified: true,

@@ -6,6 +6,8 @@ import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.u
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { notify, notifyAdmins } from "../utils/notify.js";
+import { sanitizePermissions, DEFAULT_PERMISSIONS } from "../middleware/permission.middleware.js";
+import { assertPhone } from "../utils/validators.utils.js";
 
 const MONTH_NAMES = ["","January","February","March","April","May","June","July","August","September","October","November","December"];
 
@@ -53,14 +55,17 @@ export const registerEmployee = async (req, res, next) => {
 
 export const adminCreateEmployee = async (req, res, next) => {
   try {
-    const { name, email, phone, password, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription } = req.body;
+    const { name, email, phone, password, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription, permissions } = req.body;
     if (!name || !email || !phone || !password)
       throw new ApiError(400, "Name, email, phone and password are required");
+    const phoneDigits = assertPhone(phone);
 
     const existing = await User.findOne({ email });
     if (existing) throw new ApiError(409, "Email already registered");
 
-    const user = await User.create({ name, email, phone, password, role: "employee" });
+    const user = await User.create({ name, email, phone: phoneDigits, password, role: "employee" });
+
+    const cleanPerms = sanitizePermissions(permissions);
 
     const employee = await Employee.create({
       user: user._id,
@@ -73,6 +78,7 @@ export const adminCreateEmployee = async (req, res, next) => {
       joiningDate: joiningDate || undefined,
       monthlySalary: monthlySalary ? Number(monthlySalary) : 0,
       isVerified: true,
+      permissions: cleanPerms ?? DEFAULT_PERMISSIONS,
     });
 
     await notify({
@@ -221,7 +227,7 @@ export const getEmployeeById = async (req, res, next) => {
 // ── Admin: update employee details + account ────────────────────────
 export const updateEmployee = async (req, res, next) => {
   try {
-    const { name, email, phone, newPassword, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription } = req.body;
+    const { name, email, phone, newPassword, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription, permissions } = req.body;
 
     const employee = await Employee.findById(req.params.employeeId);
     if (!employee) throw new ApiError(404, "Employee not found");
@@ -230,7 +236,7 @@ export const updateEmployee = async (req, res, next) => {
     const user = await User.findById(employee.user).select("+password");
     if (!user) throw new ApiError(404, "User account not found");
     if (name)  user.name  = name;
-    if (phone) user.phone = phone;
+    if (phone) user.phone = assertPhone(phone);
     if (email && email !== user.email) {
       const taken = await User.findOne({ email: email.toLowerCase(), _id: { $ne: user._id } });
       if (taken) throw new ApiError(409, "Email is already in use by another account");
@@ -248,6 +254,10 @@ export const updateEmployee = async (req, res, next) => {
     if (shopDescription!== undefined) update.shopDescription= shopDescription;
     if (monthlySalary  !== undefined) update.monthlySalary  = monthlySalary ? Number(monthlySalary) : 0;
     if (joiningDate)                  update.joiningDate    = joiningDate;
+    if (req.body.permissions !== undefined) {
+      const cleaned = sanitizePermissions(req.body.permissions);
+      if (cleaned) update.permissions = cleaned;
+    }
 
     const updated = await Employee.findByIdAndUpdate(
       req.params.employeeId, update, { new: true }

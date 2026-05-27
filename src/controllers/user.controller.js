@@ -3,6 +3,7 @@ import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { assertPhone, cleanPhone, isValidPhone } from "../utils/validators.utils.js";
 
 export const getProfile = async (req, res, next) => {
   try {
@@ -18,12 +19,10 @@ export const updateProfile = async (req, res, next) => {
     if (name && (typeof name !== "string" || name.length > 100)) {
       throw new ApiError(400, "Invalid name");
     }
-    if (phone && (typeof phone !== "string" || !/^[0-9+\-\s]{6,20}$/.test(phone))) {
-      throw new ApiError(400, "Invalid phone");
-    }
+    const phoneDigits = phone ? assertPhone(phone, { required: false }) : undefined;
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { ...(name && { name: name.trim() }), ...(phone && { phone: phone.trim() }) },
+      { ...(name && { name: name.trim() }), ...(phoneDigits && { phone: phoneDigits }) },
       { new: true, runValidators: true }
     );
     res.json(new ApiResponse(200, { user }, "Profile updated"));
@@ -65,18 +64,15 @@ export const changePassword = async (req, res, next) => {
   }
 };
 
-// Format validators kept here so add + update apply the same rules.
+// Format validators kept here so add + update apply the same rules. Pincode
+// is optional (Nepal-first), phone must be a 10-digit number.
 const PINCODE_RE = /^\d{6}$/;
-const PHONE_RE   = /^[6-9]\d{9}$/;
 const validateAddressFormats = ({ pincode, phone }) => {
-  if (pincode !== undefined && !PINCODE_RE.test(String(pincode))) {
+  if (pincode !== undefined && pincode !== "" && !PINCODE_RE.test(String(pincode))) {
     throw new ApiError(400, "Pincode must be exactly 6 digits");
   }
-  if (phone !== undefined) {
-    const digits = String(phone).replace(/\D/g, "").slice(-10);
-    if (!PHONE_RE.test(digits)) {
-      throw new ApiError(400, "Phone must be a valid 10-digit Indian mobile number");
-    }
+  if (phone !== undefined && !isValidPhone(phone)) {
+    throw new ApiError(400, "Phone number must be exactly 10 digits");
   }
 };
 
@@ -89,7 +85,7 @@ export const addAddress = async (req, res, next) => {
     validateAddressFormats({ pincode, phone });
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { $push: { addresses: { fullName, phone, pincode, state, city, houseNo, area, landmark } } },
+      { $push: { addresses: { fullName, phone: cleanPhone(phone), pincode, state, city, houseNo, area, landmark } } },
       { new: true }
     );
     res.status(201).json(new ApiResponse(201, { addresses: user.addresses }, "Address added"));
@@ -108,6 +104,7 @@ export const updateAddress = async (req, res, next) => {
       if (typeof req.body?.[k] === "string") sanitized[k] = req.body[k].trim();
     }
     validateAddressFormats(sanitized);
+    if (sanitized.phone) sanitized.phone = cleanPhone(sanitized.phone);
     const setObj = {};
     for (const [k, v] of Object.entries(sanitized)) {
       setObj[`addresses.$.${k}`] = v;

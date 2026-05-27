@@ -47,11 +47,12 @@ export const deleteFromCloudinary = async (publicId) => {
   return cloudinary.uploader.destroy(publicId);
 };
 
+// Cloudinary URLs look like .../upload/[v123/]<folder>/.../<filename>.<ext>
+// — public_id is everything after the version segment, minus the extension.
 export const getPublicIdFromUrl = (url) => {
-  const parts = url.split("/");
-  const filename = parts[parts.length - 1].split(".")[0];
-  const folder = parts[parts.length - 2];
-  return `${folder}/${filename}`;
+  if (!url || typeof url !== "string") return null;
+  const match = url.match(/\/upload\/(?:v\d+\/)?(.+?)(?:\.[a-zA-Z0-9]+)?$/);
+  return match ? match[1] : null;
 };
 
 export default cloudinary;
