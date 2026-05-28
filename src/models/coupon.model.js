@@ -3,7 +3,10 @@ import mongoose from "mongoose";
 const couponSchema = new mongoose.Schema(
   {
     code: { type: String, unique: true, uppercase: true, trim: true },
-    discountType: { type: String, enum: ["PERCENTAGE", "FIXED"], required: true },
+    // FREEBIE        = add `freebieProduct` × `freebieQuantity` to the order at Rs. 0
+    // FREE_SHIPPING  = waive shipping on this order (shippingPrice → 0)
+    // discountValue is forced to 0 for both in pre-validate.
+    discountType: { type: String, enum: ["PERCENTAGE", "FIXED", "FREEBIE", "FREE_SHIPPING"], required: true },
     discountValue: { type: Number, required: true, min: 0 },
     minimumAmount: { type: Number, default: 0 },
     maximumDiscount: { type: Number },
@@ -16,9 +19,26 @@ const couponSchema = new mongoose.Schema(
     applicableBrands:        [{ type: mongoose.Schema.Types.ObjectId, ref: 'Brand' }],
     applicableCategories:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
     applicableSubcategories: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Category' }],
+    // Freebie config — only used when discountType === "FREEBIE".
+    freebieProduct:  { type: mongoose.Schema.Types.ObjectId, ref: "Product", default: null },
+    freebieQuantity: { type: Number, default: 1, min: 1, max: 10 },
   },
   { timestamps: true }
 );
+
+// FREEBIE coupons carry no cash discount — normalise the value to 0 so the
+// math elsewhere (totals, refunds, eligibility) stays correct regardless of
+// what was posted.
+couponSchema.pre("validate", function (next) {
+  if (this.discountType === "FREEBIE") {
+    this.discountValue = 0;
+    if (!this.freebieQuantity || this.freebieQuantity < 1) this.freebieQuantity = 1;
+  }
+  if (this.discountType === "FREE_SHIPPING") {
+    this.discountValue = 0;
+  }
+  next();
+});
 
 couponSchema.methods.isValid = function (orderAmount, userId) {
   const now = new Date();
@@ -35,6 +55,9 @@ couponSchema.methods.isValid = function (orderAmount, userId) {
 };
 
 couponSchema.methods.calculateDiscount = function (orderAmount) {
+  // FREEBIE and FREE_SHIPPING never produce a cash discount on items — they
+  // act on a different part of the total (a free gift line or shipping=0).
+  if (this.discountType === "FREEBIE" || this.discountType === "FREE_SHIPPING") return 0;
   if (!Number.isFinite(orderAmount) || orderAmount <= 0) return 0;
   let discount = this.discountType === "PERCENTAGE"
     ? (orderAmount * this.discountValue) / 100

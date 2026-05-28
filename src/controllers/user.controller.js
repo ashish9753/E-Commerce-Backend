@@ -78,14 +78,18 @@ const validateAddressFormats = ({ pincode, phone }) => {
 
 export const addAddress = async (req, res, next) => {
   try {
-    const { fullName, phone, pincode, state, city, houseNo, area, landmark } = req.body;
-    if (!fullName || !phone || !pincode || !state || !city || !houseNo || !area) {
+    const { fullName, phone, pincode, state, city, houseNo, area, landmark, upayaLocationId, upayaAreaId } = req.body;
+    if (!fullName || !phone || !state || !city || !houseNo || !area) {
       throw new ApiError(400, "Required address fields missing");
     }
     validateAddressFormats({ pincode, phone });
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { $push: { addresses: { fullName, phone: cleanPhone(phone), pincode, state, city, houseNo, area, landmark } } },
+      { $push: { addresses: {
+        fullName, phone: cleanPhone(phone), pincode: pincode || "", state, city, houseNo, area, landmark,
+        upayaLocationId: upayaLocationId != null ? Number(upayaLocationId) : null,
+        upayaAreaId:     upayaAreaId     != null ? Number(upayaAreaId)     : null,
+      } } },
       { new: true }
     );
     res.status(201).json(new ApiResponse(201, { addresses: user.addresses }, "Address added"));
@@ -99,9 +103,13 @@ export const updateAddress = async (req, res, next) => {
     const { addressId } = req.params;
     // Whitelist allowed fields — prevents mass assignment and _id tampering
     const ALLOWED = ["fullName", "phone", "pincode", "state", "city", "houseNo", "area", "landmark"];
+    const NUMERIC = ["upayaLocationId", "upayaAreaId"];
     const sanitized = {};
     for (const k of ALLOWED) {
       if (typeof req.body?.[k] === "string") sanitized[k] = req.body[k].trim();
+    }
+    for (const k of NUMERIC) {
+      if (req.body?.[k] !== undefined) sanitized[k] = req.body[k] === null ? null : Number(req.body[k]);
     }
     validateAddressFormats(sanitized);
     if (sanitized.phone) sanitized.phone = cleanPhone(sanitized.phone);

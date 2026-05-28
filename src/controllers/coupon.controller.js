@@ -19,11 +19,32 @@ const normalizeCouponCode = (raw) => {
 
 export const createCoupon = async (req, res, next) => {
   try {
-    const { code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility, applicableBrands, applicableCategories, applicableSubcategories } = req.body;
-    if (!code || !discountType || !discountValue || !expiryDate) {
-      throw new ApiError(400, "code, discountType, discountValue, and expiryDate are required");
+    const {
+      code, discountType, discountValue, minimumAmount, maximumDiscount,
+      expiryDate, usageLimit, visibility,
+      applicableBrands, applicableCategories, applicableSubcategories,
+      freebieProduct, freebieQuantity,
+    } = req.body;
+    if (!code || !discountType || !expiryDate) {
+      throw new ApiError(400, "code, discountType, and expiryDate are required");
     }
-    const coupon = await Coupon.create({ code, discountType, discountValue, minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility, applicableBrands, applicableCategories, applicableSubcategories });
+    const needsDiscountValue = discountType !== "FREEBIE" && discountType !== "FREE_SHIPPING";
+    if (needsDiscountValue && !discountValue) {
+      throw new ApiError(400, "discountValue is required for PERCENTAGE / FIXED coupons");
+    }
+    if (discountType === "FREEBIE") {
+      if (!freebieProduct) throw new ApiError(400, "freebieProduct is required for FREEBIE coupons");
+      const exists = await Product.findOne({ _id: freebieProduct, isDeleted: false }).select("_id");
+      if (!exists) throw new ApiError(400, "freebieProduct does not exist");
+    }
+    const coupon = await Coupon.create({
+      code, discountType,
+      discountValue: needsDiscountValue ? discountValue : 0,
+      minimumAmount, maximumDiscount, expiryDate, usageLimit, visibility,
+      applicableBrands, applicableCategories, applicableSubcategories,
+      freebieProduct:  discountType === "FREEBIE" ? freebieProduct : null,
+      freebieQuantity: discountType === "FREEBIE" ? (Number(freebieQuantity) || 1) : 1,
+    });
     res.status(201).json(new ApiResponse(201, { coupon }, "Coupon created"));
   } catch (err) {
     next(err);
@@ -34,7 +55,9 @@ export const getAllCoupons = async (req, res, next) => {
   try {
     const { page, limit, skip } = getPaginationData(req.query);
     const [coupons, total] = await Promise.all([
-      Coupon.find().skip(skip).limit(limit).sort({ createdAt: -1 }),
+      Coupon.find()
+        .populate("freebieProduct", "title images stock")
+        .skip(skip).limit(limit).sort({ createdAt: -1 }),
       Coupon.countDocuments(),
     ]);
     res.json(new ApiResponse(200, buildPaginatedResponse(coupons, total, page, limit)));
@@ -60,10 +83,26 @@ export const updateCoupon = async (req, res, next) => {
       "discountType", "discountValue", "minimumAmount", "maximumDiscount",
       "expiryDate", "usageLimit", "visibility", "isActive",
       "applicableBrands", "applicableCategories", "applicableSubcategories",
+      "freebieProduct", "freebieQuantity",
     ];
     const updates = {};
     for (const k of ALLOWED) {
       if (req.body[k] !== undefined) updates[k] = req.body[k];
+    }
+    // Cross-field invariants when the type is being changed.
+    if (updates.discountType === "FREEBIE") {
+      if (!updates.freebieProduct) {
+        const existing = await Coupon.findById(req.params.couponId).select("freebieProduct");
+        if (!existing?.freebieProduct) throw new ApiError(400, "freebieProduct is required for FREEBIE coupons");
+      }
+      updates.discountValue = 0;
+    } else if (updates.discountType === "FREE_SHIPPING") {
+      updates.discountValue   = 0;
+      updates.freebieProduct  = null;
+      updates.freebieQuantity = 1;
+    } else if (updates.discountType && updates.discountType !== "FREEBIE") {
+      updates.freebieProduct  = null;
+      updates.freebieQuantity = 1;
     }
     const coupon = await Coupon.findByIdAndUpdate(req.params.couponId, updates, { new: true, runValidators: true });
     if (!coupon) throw new ApiError(404, "Coupon not found");
@@ -103,7 +142,9 @@ export const getPublicCoupons = async (req, res, next) => {
       query.visibility = 'everyone';
     }
 
-    const coupons = await Coupon.find(query).sort({ createdAt: -1 }).limit(10);
+    const coupons = await Coupon.find(query)
+      .populate("freebieProduct", "title images")
+      .sort({ createdAt: -1 }).limit(10);
     res.json(new ApiResponse(200, { coupons }));
   } catch (err) {
     next(err);
@@ -115,11 +156,22 @@ export const validateCoupon = async (req, res, next) => {
     const code = normalizeCouponCode(req.body?.code);
     if (!code) throw new ApiError(400, "Invalid coupon code");
 
-    const coupon = await Coupon.findOne({ code });
+    const coupon = await Coupon.findOne({ code }).populate("freebieProduct", "title images stock price discountPrice isDeleted isPublished");
     if (!coupon) throw new ApiError(404, "Invalid coupon code");
 
     const audience = await validateCouponAudience(coupon, req.user._id);
     if (!audience.valid) throw new ApiError(400, audience.message);
+
+    // FREEBIE coupons need a still-available product on the other side.
+    if (coupon.discountType === "FREEBIE") {
+      const p = coupon.freebieProduct;
+      if (!p || p.isDeleted || !p.isPublished) {
+        throw new ApiError(400, "The free gift on this coupon is no longer available");
+      }
+      if ((p.stock ?? 0) < (coupon.freebieQuantity || 1)) {
+        throw new ApiError(400, "Sorry, the free gift on this coupon is out of stock");
+      }
+    }
 
     // Always price against server-known data — never trust a client-supplied
     // amount. For Buy Now (directItem), validate against that single product;
@@ -164,14 +216,26 @@ export const validateCoupon = async (req, res, next) => {
     }
 
     const discount = coupon.calculateDiscount(applicableAmount);
+    const freebie = coupon.discountType === "FREEBIE" && coupon.freebieProduct
+      ? {
+          _id:       coupon.freebieProduct._id,
+          title:     coupon.freebieProduct.title,
+          image:     coupon.freebieProduct.images?.[0] || "",
+          quantity:  coupon.freebieQuantity || 1,
+        }
+      : null;
+    const freeShipping = coupon.discountType === "FREE_SHIPPING";
     res.json(new ApiResponse(200, {
       discount,
       finalAmount: parseFloat((orderAmount - discount).toFixed(2)),
+      freebie,
+      freeShipping,
       coupon: {
         _id: coupon._id,
         code: coupon.code,
         discountType: coupon.discountType,
         discountValue: coupon.discountValue,
+        freebieQuantity: coupon.freebieQuantity,
       },
     }));
   } catch (err) {

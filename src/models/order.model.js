@@ -6,6 +6,8 @@ const orderItemSchema = new mongoose.Schema({
   image: String,
   quantity: Number,
   price: Number,
+  // True when this line was added by a FREEBIE coupon (price will be 0).
+  isFreebie: { type: Boolean, default: false },
 }, { _id: false });
 
 const shippingAddressSchema = new mongoose.Schema({
@@ -17,6 +19,10 @@ const shippingAddressSchema = new mongoose.Schema({
   houseNo: String,
   area: String,
   landmark: String,
+  // Upaya delivery references — set when the address is picked from the
+  // Upaya location list so we can dispatch automatically.
+  upayaLocationId: { type: Number, default: null },
+  upayaAreaId:     { type: Number, default: null },
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema(
@@ -76,6 +82,16 @@ const orderSchema = new mongoose.Schema(
     // Halfway-mark payment reminder for unpaid ONLINE orders. Tracked so the
     // sweeper sends exactly one reminder per order before auto-cancellation.
     paymentReminderSentAt: { type: Date, default: null },
+    // ─── Upaya integration ───────────────────────────────────────────────
+    upayaOrderRef:   { type: String, default: null }, // reference returned by Upaya add-order
+    upayaTrackingId: { type: String, default: null }, // tracking id (often same as order ref)
+    upayaSyncStatus: {
+      type: String,
+      enum: ["NOT_SENT", "PENDING", "SYNCED", "FAILED", "SKIPPED"],
+      default: "NOT_SENT",
+    },
+    upayaError:      { type: String, default: null },
+    upayaSyncedAt:   { type: Date, default: null },
   },
   { timestamps: true }
 );

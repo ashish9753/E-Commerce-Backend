@@ -22,6 +22,7 @@ import attributeRoutes from "./attribute.routes.js";
 import eventRoutes from "./event.routes.js";
 import settingsRoutes from "./settings.routes.js";
 import deliveryAreaRoutes from "./deliveryArea.routes.js";
+import upayaRoutes from "./upaya.routes.js";
 
 const router = Router();
 
@@ -47,5 +48,6 @@ router.use("/attributes", attributeRoutes);
 router.use("/events", eventRoutes);
 router.use("/settings", settingsRoutes);
 router.use("/delivery-areas", deliveryAreaRoutes);
+router.use("/upaya", upayaRoutes);
 
 export default router;

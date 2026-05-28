@@ -1,4 +1,6 @@
+import mongoose from "mongoose";
 import Product from "../models/product.model.js";
+import Category from "../models/category.model.js";
 import Employee from "../models/employee.model.js";
 import RecentlyViewed from "../models/recentlyViewed.model.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
@@ -69,7 +71,25 @@ export const getProducts = async (req, res, next) => {
     const { search, category, brand, minPrice, maxPrice, sort, isFeatured } = req.query;
 
     const filter = { isDeleted: false, isPublished: true };
-    if (category) filter.category = category;
+    if (category) {
+      // Accept either an ObjectId or a category name/slug. If a name is
+      // supplied, look it up case-insensitively. If no Category matches,
+      // short-circuit to an empty result instead of throwing a CastError.
+      if (mongoose.Types.ObjectId.isValid(category)) {
+        filter.category = category;
+      } else {
+        const cat = await Category.findOne({
+          $or: [
+            { name: { $regex: `^${category}$`, $options: "i" } },
+            { slug: { $regex: `^${category}$`, $options: "i" } },
+          ],
+        }).select("_id");
+        if (!cat) {
+          return res.json(new ApiResponse(200, buildPaginatedResponse([], 0, page, limit)));
+        }
+        filter.category = cat._id;
+      }
+    }
     if (brand) filter.brand = { $regex: brand, $options: "i" };
     if (isFeatured) filter.isFeatured = isFeatured === "true";
     if (minPrice || maxPrice) {

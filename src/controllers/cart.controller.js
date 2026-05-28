@@ -54,7 +54,11 @@ export const getCart = async (req, res, next) => {
     const cart = await Cart.findOne({ user: req.user._id }).populate({
       path: "items.product",
       select: "title price discountPrice images stock isDeleted isPublished brand category",
-    }).populate("coupon", "code discountType discountValue applicableBrands applicableCategories applicableSubcategories");
+    }).populate({
+      path: "coupon",
+      select: "code discountType discountValue applicableBrands applicableCategories applicableSubcategories freebieProduct freebieQuantity",
+      populate: { path: "freebieProduct", select: "title images stock" },
+    });
 
     if (!cart) return res.json(new ApiResponse(200, { cart: { items: [], totalItems: 0, totalPrice: 0, finalPrice: 0 } }));
 
@@ -174,7 +178,7 @@ export const applyCoupon = async (req, res, next) => {
     );
     if (!cart || cart.items.length === 0) throw new ApiError(400, "Cart is empty");
 
-    const coupon = await Coupon.findOne({ code });
+    const coupon = await Coupon.findOne({ code }).populate("freebieProduct", "title images stock isDeleted isPublished");
     if (!coupon) throw new ApiError(404, "Invalid coupon code");
 
     const validity = coupon.isValid(cart.totalPrice, req.user._id);
@@ -182,6 +186,17 @@ export const applyCoupon = async (req, res, next) => {
 
     const audience = await validateCouponAudience(coupon, req.user._id);
     if (!audience.valid) throw new ApiError(400, audience.message);
+
+    // FREEBIE coupons need a still-available product on the other side.
+    if (coupon.discountType === "FREEBIE") {
+      const p = coupon.freebieProduct;
+      if (!p || p.isDeleted || !p.isPublished) {
+        throw new ApiError(400, "The free gift on this coupon is no longer available");
+      }
+      if ((p.stock ?? 0) < (coupon.freebieQuantity || 1)) {
+        throw new ApiError(400, "Sorry, the free gift on this coupon is out of stock");
+      }
+    }
 
     // Discount applies only to items matching the coupon's brand/category
     // restrictions. The minimum-amount check above runs against the full cart;
@@ -197,7 +212,24 @@ export const applyCoupon = async (req, res, next) => {
     cart.finalPrice = parseFloat((cart.totalPrice - discount).toFixed(2));
     await cart.save();
 
-    res.json(new ApiResponse(200, { discount, finalPrice: cart.finalPrice }, `Coupon applied! You saved ₹${discount}`));
+    const freebie = coupon.discountType === "FREEBIE" && coupon.freebieProduct
+      ? {
+          _id:      coupon.freebieProduct._id,
+          title:    coupon.freebieProduct.title,
+          image:    coupon.freebieProduct.images?.[0] || "",
+          quantity: coupon.freebieQuantity || 1,
+        }
+      : null;
+    const freeShipping = coupon.discountType === "FREE_SHIPPING";
+    const message = coupon.discountType === "FREEBIE"
+      ? `Coupon applied! Free gift unlocked: ${freebie?.title}`
+      : freeShipping
+        ? `Coupon applied! Free shipping unlocked.`
+        : `Coupon applied! You saved ₹${discount}`;
+    res.json(new ApiResponse(200, {
+      discount, finalPrice: cart.finalPrice, freebie, freeShipping,
+      discountType: coupon.discountType,
+    }, message));
   } catch (err) {
     next(err);
   }

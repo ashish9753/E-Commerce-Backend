@@ -10,6 +10,10 @@ const addressSchema = new mongoose.Schema({
   houseNo: String,
   area: String,
   landmark: String,
+  // Upaya delivery refs — captured when the user picks a city from the
+  // Upaya-synced location list (instead of free-typing).
+  upayaLocationId: { type: Number, default: null },
+  upayaAreaId:     { type: Number, default: null },
 }, { _id: true });
 
 const savedRefundDetailsSchema = new mongoose.Schema({

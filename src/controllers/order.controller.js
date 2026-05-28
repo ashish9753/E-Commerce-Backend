@@ -3,6 +3,7 @@ import Product from "../models/product.model.js";
 import Order from "../models/order.model.js";
 import User from "../models/user.model.js";
 import Coupon from "../models/coupon.model.js";
+import DeliveryArea from "../models/deliveryArea.model.js";
 import { computeCouponEligibility } from "../utils/couponEligibility.utils.js";
 import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
@@ -12,6 +13,8 @@ import { validateCouponAudience } from "../utils/couponAudience.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { uploadToCloudinary } from "../utils/cloudinary.utils.js";
+import { upayaService } from "../services/upaya.service.js";
+import { dispatchToUpaya } from "../queues/order.processor.js";
 
 const ORDER_STATUS_MESSAGES = {
   CONFIRMED:        { title: "Order Confirmed ✅",          message: "Your order has been confirmed and is being prepared." },
@@ -34,6 +37,127 @@ const VALID_ORDER_STATUSES = [
   "OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED", "RETURNED",
 ];
 const VALID_PAYMENT_STATUSES = ["PENDING", "PAID", "FAILED", "REFUNDED"];
+
+const ORDER_STATUS_RANK = {
+  PLACED: 0,
+  CONFIRMED: 1,
+  PACKED: 2,
+  SHIPPED: 3,
+  OUT_FOR_DELIVERY: 4,
+  DELIVERED: 5,
+};
+
+const UPAYA_STATUS_MAP = [
+  { status: "DELIVERED",        patterns: ["DELIVERED", "COMPLETED", "SUCCESSFUL DELIVERY"] },
+  { status: "OUT_FOR_DELIVERY", patterns: ["OUT FOR DELIVERY", "OUT_FOR_DELIVERY", "OFD"] },
+  { status: "SHIPPED",          patterns: ["PICKED", "PICKED UP", "DISPATCHED", "IN TRANSIT", "IN_TRANSIT", "ON THE WAY", "SHIPPED"] },
+  { status: "PACKED",           patterns: ["READY FOR PICKUP", "READY_TO_PICKUP", "READY FOR DISPATCH", "ASSIGNED"] },
+  { status: "CONFIRMED",        patterns: ["ORDER CREATED", "CREATED", "BOOKED", "RECEIVED", "CONFIRMED"] },
+  { status: "CANCELLED",        patterns: ["CANCELLED", "CANCELED"] },
+];
+
+const getNested = (obj, path) => path.split(".").reduce((cur, key) => cur?.[key], obj);
+
+const extractUpayaStatus = (tracking) => {
+  const candidates = [
+    "status",
+    "current_status",
+    "currentStatus",
+    "delivery_status",
+    "deliveryStatus",
+    "order_status",
+    "orderStatus",
+    "tracking.status",
+    "tracking.current_status",
+    "tracking.currentStatus",
+    "data.status",
+    "data.current_status",
+    "data.currentStatus",
+  ];
+
+  for (const path of candidates) {
+    const value = getNested(tracking, path);
+    if (value) return String(value);
+  }
+  return "";
+};
+
+const mapUpayaStatusToOrderStatus = (tracking) => {
+  const raw = extractUpayaStatus(tracking).trim();
+  if (!raw) return null;
+
+  const normalised = raw.replace(/[_-]+/g, " ").replace(/\s+/g, " ").toUpperCase();
+  return UPAYA_STATUS_MAP.find(({ patterns }) => patterns.some(pattern => normalised.includes(pattern)))?.status || null;
+};
+
+const shouldAdvanceOrderStatus = (currentStatus, nextStatus) => {
+  if (!nextStatus || currentStatus === nextStatus) return false;
+  if (["CANCELLED", "RETURNED"].includes(currentStatus)) return false;
+  if (nextStatus === "CANCELLED") return currentStatus !== "DELIVERED";
+  return (ORDER_STATUS_RANK[nextStatus] ?? -1) > (ORDER_STATUS_RANK[currentStatus] ?? -1);
+};
+
+const applyOrderStatusSideEffects = (order, status) => {
+  if (status === "DELIVERED") {
+    order.deliveredAt = order.deliveredAt || new Date();
+    order.paymentStatus = "PAID";
+    order.paidAt = order.paidAt || new Date();
+  }
+};
+
+const notifyCustomerForOrderStatus = async (order, status, note = "") => {
+  const msg = ORDER_STATUS_MESSAGES[status];
+  if (!msg) return;
+
+  await notify({
+    userId:  order.user,
+    title:   msg.title,
+    message: msg.message + (note ? ` Note: ${note}` : ""),
+    type:    "ORDER",
+    link:    `/track?id=${order._id}`,
+  });
+};
+
+const syncOrderStatusFromUpayaTracking = async (order, tracking) => {
+  const nextStatus = mapUpayaStatusToOrderStatus(tracking);
+  if (!shouldAdvanceOrderStatus(order.orderStatus, nextStatus)) {
+    return { updated: false, status: order.orderStatus, upayaStatus: extractUpayaStatus(tracking) || null };
+  }
+
+  const note = `Auto-synced from Upaya tracking${extractUpayaStatus(tracking) ? `: ${extractUpayaStatus(tracking)}` : ""}`;
+  order.orderStatus = nextStatus;
+  order.statusHistory.push({ status: nextStatus, note, timestamp: new Date() });
+  applyOrderStatusSideEffects(order, nextStatus);
+  await order.save();
+  await notifyCustomerForOrderStatus(order, nextStatus, note);
+
+  return { updated: true, status: nextStatus, upayaStatus: extractUpayaStatus(tracking) || null };
+};
+
+const dispatchToUpayaForFulfillment = async (order) => {
+  if (!["CONFIRMED", "PACKED", "SHIPPED", "OUT_FOR_DELIVERY"].includes(order.orderStatus)) {
+    return { dispatched: false, ref: null };
+  }
+
+  const alreadySynced = order.upayaSyncStatus === "SYNCED" && order.upayaOrderRef;
+  const ref = alreadySynced ? order.upayaOrderRef : await dispatchToUpaya(order._id);
+  const fresh = await Order.findById(order._id);
+  if (!fresh) return { dispatched: false, ref };
+
+  if (ref && shouldAdvanceOrderStatus(fresh.orderStatus, "SHIPPED")) {
+    fresh.orderStatus = "SHIPPED";
+    fresh.trackingId = fresh.trackingId || ref;
+    fresh.statusHistory.push({
+      status: "SHIPPED",
+      note: `Shipment created on Upaya. Tracking ref: ${ref}`,
+      timestamp: new Date(),
+    });
+    await fresh.save();
+    await notifyCustomerForOrderStatus(fresh, "SHIPPED", `Tracking ref: ${ref}`);
+  }
+
+  return { dispatched: !!ref && !alreadySynced, ref };
+};
 
 /**
  * Place Order — Uses Bull queue to serialize concurrent purchase requests.
@@ -119,8 +243,36 @@ export const placeOrder = async (req, res, next) => {
     // Derive a readable tax label (e.g. "GST" or "GST / IGST" for mixed)
     const taxLabel = taxLabelsSet.size > 0 ? [...taxLabelsSet].join(" / ") : "GST";
 
-    // Price calculations
-    const shippingPrice = itemsPrice >= SHIPPING_THRESHOLD ? 0 : SHIPPING_PRICE;
+    // Shipping calculation — in priority order:
+    //   1. Custom DeliveryArea entry matching the address's city (admin's
+    //      "Custom / Fallback Delivery Areas" panel) — exact, case-insensitive
+    //   2. Upaya live rate when the address has an upayaLocationId
+    //   3. Subtotal-threshold default (free over Rs. SHIPPING_THRESHOLD)
+    let shippingPrice;
+    const addrCity = address.city?.trim();
+    if (addrCity) {
+      const area = await DeliveryArea.findOne({
+        city: { $regex: `^${addrCity}$`, $options: "i" },
+        isActive: true,
+      }).select("deliveryCharge");
+      if (area) shippingPrice = Number(area.deliveryCharge) || 0;
+    }
+    if (shippingPrice === undefined && address.upayaLocationId) {
+      try {
+        const rateResp = await upayaService.rate({
+          location_id: address.upayaLocationId,
+          initial_weight: 1,
+          service_type_id: 3,
+          order_type: "delivery_order",
+        });
+        const r = rateResp?.data?.rate || rateResp?.rate || rateResp;
+        const charge = Number(r?.total ?? r?.amount ?? r?.rate ?? r?.deliveryCharge);
+        if (Number.isFinite(charge) && charge >= 0) shippingPrice = charge;
+      } catch { /* fall through to default */ }
+    }
+    if (shippingPrice === undefined) {
+      shippingPrice = itemsPrice >= SHIPPING_THRESHOLD ? 0 : SHIPPING_PRICE;
+    }
 
     // Coupon discount — applies to BOTH Cart and Buy Now flows.
     // Resolution order:
@@ -136,14 +288,14 @@ export const placeOrder = async (req, res, next) => {
     let coupon = null;
     const rawCode = typeof req.body?.couponCode === "string" ? req.body.couponCode.trim().toUpperCase() : null;
     if (rawCode && /^[A-Z0-9_-]{2,32}$/.test(rawCode)) {
-      coupon = await Coupon.findOne({ code: rawCode });
+      coupon = await Coupon.findOne({ code: rawCode }).populate("freebieProduct", "title images stock price discountPrice isDeleted isPublished");
       if (!coupon) {
         throw new ApiError(400, `Coupon "${rawCode}" is not valid.`);
       }
     } else {
       const userCart = await Cart.findOne({ user: user._id });
       if (userCart?.coupon) {
-        coupon = await Coupon.findById(userCart.coupon);
+        coupon = await Coupon.findById(userCart.coupon).populate("freebieProduct", "title images stock price discountPrice isDeleted isPublished");
         if (!coupon) {
           throw new ApiError(400, "The coupon on your cart no longer exists. Please remove it and try again.");
         }
@@ -165,6 +317,43 @@ export const placeOrder = async (req, res, next) => {
       }
       discountAmount = coupon.calculateDiscount(applicableAmount);
       couponId = coupon._id;
+
+      // FREEBIE: append the gift product as a Rs. 0 line item. The queue
+      // processor will decrement its stock alongside the paid items, so we
+      // verify stock here too — same shape as the customer-facing check.
+      if (coupon.discountType === "FREEBIE") {
+        const fp  = coupon.freebieProduct;
+        const fQty = coupon.freebieQuantity || 1;
+        if (!fp || fp.isDeleted || !fp.isPublished) {
+          throw new ApiError(400, `Coupon "${coupon.code}": the free gift is no longer available.`);
+        }
+        if ((fp.stock ?? 0) < fQty) {
+          throw new ApiError(400, `Coupon "${coupon.code}": the free gift is out of stock.`);
+        }
+        // Make sure customer isn't already buying the same item — avoid
+        // double-decrementing stock on top of the paid copy.
+        const existing = orderItems.find((it) => String(it.product) === String(fp._id));
+        if (existing) {
+          existing.quantity += fQty; // bundle it onto the paid line
+          // price stays at paid rate; the "free" copies are absorbed via
+          // discountAmount adjustment below
+          discountAmount = parseFloat((discountAmount + existing.price * fQty).toFixed(2));
+        } else {
+          orderItems.push({
+            product:  fp._id,
+            title:    fp.title,
+            image:    fp.images?.[0] || "",
+            quantity: fQty,
+            price:    0,
+            isFreebie: true,
+          });
+        }
+      }
+
+      // FREE_SHIPPING: waive the shipping fee for this order.
+      if (coupon.discountType === "FREE_SHIPPING") {
+        shippingPrice = 0;
+      }
     }
 
     const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
@@ -304,7 +493,13 @@ export const cancelOrder = async (req, res, next) => {
     const isStaff    = req.user.role === "admin" || req.user.role === "employee";
     if (!isOwner && !isStaff) throw new ApiError(403, "Access denied");
 
-    const cancelableStatuses = ["PLACED", "CONFIRMED"];
+    // Customers can only cancel while the order is still PLACED. Once the
+    // order is CONFIRMED the shipment is booked on Upaya, so only staff
+    // (admin/employee) can cancel from there. Staff can still cancel up to
+    // CONFIRMED via this endpoint.
+    const customerCancelable = ["PLACED"];
+    const staffCancelable    = ["PLACED", "CONFIRMED"];
+    const cancelableStatuses = isStaff ? staffCancelable : customerCancelable;
     if (!cancelableStatuses.includes(order.orderStatus)) {
       throw new ApiError(400, `Cannot cancel order in '${order.orderStatus}' status`);
     }
@@ -484,6 +679,7 @@ export const getAllOrders = async (req, res, next) => {
       Order.find(filter)
         .populate("user", "name email phone")
         .populate("orderItems.product", "title")
+        .populate("coupon", "code discountType discountValue freebieQuantity")
         .skip(skip)
         .limit(limit)
         .sort({ createdAt: -1 }),
@@ -523,25 +719,15 @@ export const updateOrderStatus = async (req, res, next) => {
     order.orderStatus = status;
     order.statusHistory.push({ status, note, timestamp: new Date() });
     if (trackingId) order.trackingId = trackingId;
-    if (status === "DELIVERED") {
-      order.deliveredAt = new Date();
-      order.paymentStatus = "PAID";
-      order.paidAt = new Date();
-    }
+    applyOrderStatusSideEffects(order, status);
 
     await order.save();
 
     // Notify customer
-    const msg = ORDER_STATUS_MESSAGES[status];
-    if (msg) {
-      await notify({
-        userId:  order.user,
-        title:   msg.title,
-        message: msg.message + (note ? ` Note: ${note}` : ""),
-        type:    "ORDER",
-        link:    `/track?id=${order._id}`,
-      });
-    }
+    await notifyCustomerForOrderStatus(order, status, note);
+
+    const upayaDispatch = await dispatchToUpayaForFulfillment(order);
+    const freshOrder = await Order.findById(order._id);
 
     // Notify relevant employees
     setImmediate(async () => {
@@ -560,7 +746,7 @@ export const updateOrderStatus = async (req, res, next) => {
       } catch { /* non-critical */ }
     });
 
-    res.json(new ApiResponse(200, { order }, "Order status updated"));
+    res.json(new ApiResponse(200, { order: freshOrder || order, upayaDispatch }, "Order status updated"));
   } catch (err) {
     next(err);
   }
@@ -583,25 +769,17 @@ export const employeeUpdateOrderStatus = async (req, res, next) => {
     order.orderStatus = status;
     order.statusHistory.push({ status, note: note || `Status updated by employee`, timestamp: new Date() });
     if (trackingId) order.trackingId = trackingId;
-    if (status === "DELIVERED") {
-      order.deliveredAt  = new Date();
-      order.paymentStatus = "PAID";
-      order.paidAt       = new Date();
-    }
+    applyOrderStatusSideEffects(order, status);
 
     await order.save();
 
     // Notify customer with rich message
-    const msg = ORDER_STATUS_MESSAGES[status];
-    await notify({
-      userId:  order.user,
-      title:   msg?.title || `Order ${status.replace(/_/g, " ")}`,
-      message: (msg?.message || `Your order #${order.orderNumber} is now: ${status.replace(/_/g, " ")}.`) + (note ? ` ${note}` : ""),
-      type:    "ORDER",
-      link:    `/track?id=${order._id}`,
-    });
+    await notifyCustomerForOrderStatus(order, status, note);
 
-    res.json(new ApiResponse(200, { order }, "Order status updated"));
+    const upayaDispatch = await dispatchToUpayaForFulfillment(order);
+    const freshOrder = await Order.findById(order._id);
+
+    res.json(new ApiResponse(200, { order: freshOrder || order, upayaDispatch }, "Order status updated"));
   } catch (err) {
     next(err);
   }
@@ -632,6 +810,7 @@ export const getEmployeeOrders = async (req, res, next) => {
       Order.find(filter)
         .populate("user", "name email phone")
         .populate("orderItems.product", "title images price discountPrice")
+        .populate("coupon", "code discountType discountValue freebieQuantity")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
@@ -787,4 +966,66 @@ export const getOrderStats = async (req, res, next) => {
   } catch (err) {
     next(err);
   }
+};
+
+// Admin/employee — re-dispatch an order to Upaya. Used after a failed sync
+// or if the customer's Upaya area is corrected manually.
+export const retryUpayaDispatch = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findById(orderId);
+    if (!order) throw new ApiError(404, "Order not found");
+
+    // Reset state so the helper re-attempts
+    if (order.upayaSyncStatus === "SYNCED" && !req.body?.force) {
+      return res.json(new ApiResponse(200, {
+        upayaOrderRef: order.upayaOrderRef,
+        upayaSyncStatus: order.upayaSyncStatus,
+      }, "Already synced — pass { force: true } to resync"));
+    }
+    await Order.findByIdAndUpdate(orderId, { upayaSyncStatus: "NOT_SENT", upayaError: null, upayaOrderRef: null, upayaTrackingId: null });
+    const ref = await dispatchToUpaya(orderId);
+    const updated = await Order.findById(orderId).select("upayaOrderRef upayaTrackingId upayaSyncStatus upayaError upayaSyncedAt trackingId");
+    res.json(new ApiResponse(200, { order: updated, ref }, ref ? "Order dispatched to Upaya" : "Dispatch failed — see upayaError"));
+  } catch (err) { next(err); }
+};
+
+// Any signed-in user can fetch live tracking for their own order. Admin/
+// employee can fetch any order's tracking.
+export const getUpayaTracking = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+    const order = await Order.findById(orderId).select("user upayaOrderRef upayaTrackingId orderNumber orderStatus statusHistory deliveredAt paymentStatus paidAt");
+    if (!order) throw new ApiError(404, "Order not found");
+
+    const isOwner = order.user?.toString() === req.user._id.toString();
+    const isStaff = req.user.role === "admin" || req.user.role === "employee";
+    if (!isOwner && !isStaff) throw new ApiError(403, "Forbidden");
+
+    const ref = order.upayaTrackingId || order.upayaOrderRef;
+    if (!ref) {
+      return res.json(new ApiResponse(200, { available: false, message: "This order has not been dispatched via Upaya yet" }));
+    }
+
+    try {
+      const tracking = await upayaService.trackOrder(ref);
+      const sync = await syncOrderStatusFromUpayaTracking(order, tracking);
+      res.json(new ApiResponse(200, {
+        available: true,
+        ref,
+        tracking,
+        sync,
+        order: {
+          orderStatus: order.orderStatus,
+          statusHistory: order.statusHistory,
+          deliveredAt: order.deliveredAt,
+          paymentStatus: order.paymentStatus,
+          paidAt: order.paidAt,
+        },
+      }));
+    } catch (err) {
+      // Surface the upstream issue without exploding the order details page.
+      res.json(new ApiResponse(200, { available: false, ref, error: err.message }));
+    }
+  } catch (err) { next(err); }
 };

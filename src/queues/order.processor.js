@@ -8,6 +8,7 @@ import Notification from "../models/notification.model.js";
 import Employee from "../models/employee.model.js";
 import { notify, notifyEmployee, notifyAdmins } from "../utils/notify.js";
 import { pushToUser } from "../utils/sseClients.js";
+import { upayaService } from "../services/upaya.service.js";
 
 /**
  * Queue processor for order placement.
@@ -254,5 +255,97 @@ export const processOrderJob = async (job) => {
       }
     }
     throw err;
+  }
+};
+
+// ─── Upaya dispatch ────────────────────────────────────────────────────────
+// Push the order to Upaya for delivery. Idempotent: if the order has already
+// been synced we exit early. Failures are persisted on the order so admin/
+// employee can see them and retry. The customer flow is never blocked.
+export const dispatchToUpaya = async (orderId) => {
+  if (!upayaService.isConfigured()) {
+    await Order.findByIdAndUpdate(orderId, {
+      upayaSyncStatus: "SKIPPED",
+      upayaError: "Upaya API key not configured on server",
+    });
+    return null;
+  }
+
+  const order = await Order.findById(orderId).populate("orderItems.product", "weight");
+  if (!order) return null;
+  if (order.upayaSyncStatus === "SYNCED" && order.upayaOrderRef) return order.upayaOrderRef;
+
+  const addr = order.shippingAddress || {};
+  const areaId = addr.upayaAreaId || addr.upayaLocationId;
+  if (!areaId) {
+    await Order.findByIdAndUpdate(orderId, {
+      upayaSyncStatus: "FAILED",
+      upayaError: "Shipping address has no Upaya area selected",
+    });
+    return null;
+  }
+
+  // Roll up cart weight (default 1 kg per item if product weight isn't set).
+  const initial_weight = order.orderItems.reduce((sum, it) => {
+    const w = Number(it.product?.weight) || 1;
+    return sum + w * (it.quantity || 1);
+  }, 0) || 1;
+
+  const productDescription = order.orderItems
+    .map(it => `${it.title} x${it.quantity}`)
+    .join(", ")
+    .slice(0, 240);
+
+  const payload = {
+    receiver_name:             addr.fullName || "Customer",
+    receiver_contact:          addr.phone || "",
+    receiver_alternate_number: "",
+    area_id:                   Number(areaId),
+    product_price:             Number(order.totalPrice) || 0,
+    cod_amount:                order.paymentMethod === "COD" ? Number(order.totalPrice) || 0 : 0,
+    remarks:                   "",
+    receiver_address:          [addr.houseNo, addr.area, addr.city, addr.state].filter(Boolean).join(", "),
+    receiver_landmark:         addr.landmark || "",
+    order_reference_id:        order.orderNumber,
+    initial_weight,
+    service_type_id:           3, // Door To Door Delivery
+    product_description:       productDescription || "General merchandise",
+    length:                    null,
+    breadth:                   null,
+    height:                    null,
+    product_category_id:       5, // Electronics — sensible default for this store
+    order_type:                "delivery_order",
+    client_note:               `Order from ${process.env.COMPANY_NAME || "TradeEngine"}`,
+  };
+
+  await Order.findByIdAndUpdate(orderId, { upayaSyncStatus: "PENDING", upayaError: null });
+
+  try {
+    const res = await upayaService.addOrder(payload);
+    // Upaya returns { orders: [{ orderNumber, ... }] } or similar — pull the
+    // first reference id we can recognise.
+    const firstOrder = Array.isArray(res?.orders) ? res.orders[0]
+                     : Array.isArray(res?.data?.orders) ? res.data.orders[0]
+                     : Array.isArray(res?.data) ? res.data[0]
+                     : res?.order || res;
+    const upayaRef = firstOrder?.orderNumber || firstOrder?.order_number
+                  || firstOrder?.tracking_id || firstOrder?.trackingId
+                  || firstOrder?.reference   || null;
+
+    await Order.findByIdAndUpdate(orderId, {
+      upayaOrderRef:   upayaRef,
+      upayaTrackingId: upayaRef,
+      upayaSyncStatus: upayaRef ? "SYNCED" : "FAILED",
+      upayaError:      upayaRef ? null : "Upaya response missing order reference",
+      upayaSyncedAt:   new Date(),
+      ...(upayaRef && !order.trackingId ? { trackingId: upayaRef } : {}),
+    });
+    return upayaRef;
+  } catch (err) {
+    await Order.findByIdAndUpdate(orderId, {
+      upayaSyncStatus: "FAILED",
+      upayaError: err.message || "Upaya dispatch failed",
+    });
+    return null;
   }
 };
