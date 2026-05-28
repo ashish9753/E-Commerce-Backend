@@ -8,6 +8,7 @@ import { generateUniqueSlug } from "../utils/slugify.utils.js";
 import { getPaginationData, buildPaginatedResponse } from "../utils/pagination.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { notifyAdmins } from "../utils/notify.js";
 
 export const createProduct = async (req, res, next) => {
   try {
@@ -58,6 +59,17 @@ export const createProduct = async (req, res, next) => {
       taxLabel:     (typeof taxLabel === "string" && taxLabel.trim()) || (parsedTaxRate > 0 ? "GST" : "No Tax"),
       images,
     });
+
+    // Notify admins when an employee adds a new product (admin-created products
+    // skip this — the admin is the one creating it).
+    if (req.user.role !== "admin") {
+      notifyAdmins({
+        title:   "New Product Added 📦",
+        message: `${employee.name || "An employee"} added a new product: "${product.title}".`,
+        type:    "SYSTEM",
+        link:    "/admin",
+      }).catch(() => { /* non-critical */ });
+    }
 
     res.status(201).json(new ApiResponse(201, { product }, "Product created"));
   } catch (err) {

@@ -5,7 +5,7 @@ import Payment from "../models/payment.model.js";
 import Employee from "../models/employee.model.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
-import { notify } from "../utils/notify.js";
+import { notify, notifyAdmins } from "../utils/notify.js";
 
 let _razorpay = null;
 const getRazorpay = () => {
@@ -139,7 +139,7 @@ export const verifyRazorpayPayment = async (req, res, next) => {
     order.paidAt = new Date();
     await order.save();
 
-    // Notify all employees now that payment is confirmed
+    // Notify all employees + admins now that payment is confirmed
     setImmediate(async () => {
       try {
         const allEmployees = await Employee.find({}).select("user").lean();
@@ -154,6 +154,12 @@ export const verifyRazorpayPayment = async (req, res, next) => {
             });
           }
         }
+        await notifyAdmins({
+          title:   "Payment Received 💳",
+          message: `Order #${order.orderNumber} (₹${order.totalPrice}) — online payment confirmed.`,
+          type:    "PAYMENT",
+          link:    "/admin",
+        });
       } catch { /* non-critical */ }
     });
 

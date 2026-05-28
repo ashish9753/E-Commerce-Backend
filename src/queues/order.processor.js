@@ -189,10 +189,10 @@ export const processOrderJob = async (job) => {
       session.endSession();
     }
 
-    // --- Post-commit: notify all employees + low-stock alerts (non-blocking) ---
+    // --- Post-commit: notify employees + admins + low-stock alerts (non-blocking) ---
     setImmediate(async () => {
       try {
-        // Notify employees only for COD orders (ONLINE orders notify after payment is verified)
+        // Notify employees + admins only for COD orders (ONLINE orders notify after payment is verified)
         if (job.data.paymentMethod === "COD") {
           const allEmployees = await Employee.find({}).select("user").lean();
           for (const emp of allEmployees) {
@@ -206,18 +206,32 @@ export const processOrderJob = async (job) => {
               });
             }
           }
+          await notifyAdmins({
+            title:   "New Order Placed 🛒",
+            message: `Order #${order.orderNumber} (₹${totalPrice}, COD) was just placed.`,
+            type:    "ORDER",
+            link:    "/admin",
+          });
         }
 
-        // Low-stock alerts (threshold: 5) — still scoped to the product owner
+        // Low-stock alerts (threshold: 5) — notify product owner AND admin
         const productIds = orderItems.map(i => i.product);
         const products   = await Product.find({ _id: { $in: productIds } }).select("employee title stock");
         for (const product of products) {
-          if (product.stock <= 5 && product.employee) {
-            await notifyEmployee(product.employee.toString(), {
-              title:   `Low Stock Alert ⚠️`,
-              message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left. Restock soon to avoid missing orders.`,
+          if (product.stock <= 5) {
+            if (product.employee) {
+              await notifyEmployee(product.employee.toString(), {
+                title:   `Low Stock Alert ⚠️`,
+                message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left. Restock soon to avoid missing orders.`,
+                type:    "SYSTEM",
+                link:    "/employee",
+              });
+            }
+            await notifyAdmins({
+              title:   "Low Stock Alert ⚠️",
+              message: `"${product.title}" has only ${product.stock} unit${product.stock !== 1 ? "s" : ""} left in stock.`,
               type:    "SYSTEM",
-              link:    "/employee",
+              link:    "/admin",
             });
           }
         }

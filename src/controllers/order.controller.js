@@ -593,6 +593,14 @@ export const cancelOrder = async (req, res, next) => {
       }
     }
 
+    // Notify admins
+    await notifyAdmins({
+      title:   "Order Cancelled ❌",
+      message: `Order #${order.orderNumber} has been cancelled by the customer.${reason ? " Reason: " + reason : ""}`,
+      type:    "ORDER",
+      link:    "/admin",
+    });
+
     res.json(new ApiResponse(200, { order }, "Order cancelled successfully"));
   } catch (err) {
     next(err);
@@ -629,8 +637,15 @@ export const processCancellationRefund = async (req, res, next) => {
       userId:  order.user,
       title:   "Refund Processed ✅",
       message: `Your refund of ₹${order.refundAmount} for order #${order.orderNumber} has been processed successfully.`,
-      type:    "ORDER",
+      type:    "REFUND",
       link:    `/orders`,
+    });
+
+    await notifyAdmins({
+      title:   "Refund Completed ✅",
+      message: `Refund of ₹${order.refundAmount} for order #${order.orderNumber} has been marked as processed.`,
+      type:    "REFUND",
+      link:    "/admin",
     });
 
     res.json(new ApiResponse(200, { order }, "Refund marked as completed"));
