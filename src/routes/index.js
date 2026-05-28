@@ -23,8 +23,17 @@ import eventRoutes from "./event.routes.js";
 import settingsRoutes from "./settings.routes.js";
 import deliveryAreaRoutes from "./deliveryArea.routes.js";
 import upayaRoutes from "./upaya.routes.js";
+import { ORDER_TIMEOUT_MIN } from "../jobs/orderTimeout.job.js";
+import ApiResponse from "../utils/ApiResponse.js";
 
 const router = Router();
+
+// Public config endpoint — used by the customer Orders page countdown so it
+// matches the server-side sweep interval. Kept inline because it's a single
+// value with no controller/model behind it.
+router.get("/config/order-timeout", (_req, res) => {
+  res.json(new ApiResponse(200, { timeoutMinutes: ORDER_TIMEOUT_MIN }));
+});
 
 router.use("/auth", authRoutes);
 router.use("/users", userRoutes);
