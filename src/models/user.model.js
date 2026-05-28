@@ -51,6 +51,10 @@ const userSchema = new mongoose.Schema(
     wishlist: [{ type: mongoose.Schema.Types.ObjectId, ref: "Product" }],
     isBlocked: { type: Boolean, default: false },
     refreshToken: { type: String, select: false },
+    // Single-session enforcement for admin/employee accounts. Rotated on every
+    // login — any previously-issued token whose `sid` doesn't match is treated
+    // as revoked and the old browser is forced back to the login page.
+    activeSessionId: { type: String, default: null, select: false },
     lastLogin: Date,
     resetPasswordToken: String,
     resetPasswordExpiry: Date,

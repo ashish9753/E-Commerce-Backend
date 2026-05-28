@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { OAuth2Client } from "google-auth-library";
 import User from "../models/user.model.js";
-import { generateTokenPair, verifyRefreshToken, getRefreshCookieMaxAge } from "../utils/jwt.utils.js";
+import { generateTokenPair, generateSessionId, verifyRefreshToken, getRefreshCookieMaxAge } from "../utils/jwt.utils.js";
 import { sendEmail, passwordResetEmail } from "../utils/email.utils.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
@@ -39,13 +39,19 @@ const verifyGoogleIdToken = async (idToken) => {
 
 const issueSessionForUser = async (req, res, user) => {
   if (user.isBlocked) throw new ApiError(403, "Your account has been blocked");
-  const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);
+  // Mint a fresh sessionId on every login. For admin/employee this is what
+  // forces any previously-open browser/tab to lose access on its next API
+  // call (auth middleware compares the token's `sid` to `activeSessionId`).
+  const sessionId = generateSessionId();
+  const { accessToken, refreshToken } = generateTokenPair(user._id, user.role, sessionId);
   user.refreshToken = refreshToken;
+  user.activeSessionId = sessionId;
   user.lastLogin = new Date();
   await user.save({ validateBeforeSave: false });
   const userObj = user.toObject();
   delete userObj.password;
   delete userObj.refreshToken;
+  delete userObj.activeSessionId;
   setRefreshCookie(req, res, refreshToken, user.role);
   return { user: userObj, accessToken };
 };
@@ -103,8 +109,9 @@ export const register = async (req, res, next) => {
       role: "user",
     });
 
-    const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);
-    await User.findByIdAndUpdate(user._id, { refreshToken });
+    const sessionId = generateSessionId();
+    const { accessToken, refreshToken } = generateTokenPair(user._id, user.role, sessionId);
+    await User.findByIdAndUpdate(user._id, { refreshToken, activeSessionId: sessionId });
 
     const userObj = user.toObject();
     delete userObj.password;
@@ -130,8 +137,10 @@ export const login = async (req, res, next) => {
     }
     if (user.isBlocked) throw new ApiError(403, "Your account has been blocked");
 
-    const { accessToken, refreshToken } = generateTokenPair(user._id, user.role);
+    const sessionId = generateSessionId();
+    const { accessToken, refreshToken } = generateTokenPair(user._id, user.role, sessionId);
     user.refreshToken = refreshToken;
+    user.activeSessionId = sessionId;
     user.lastLogin = new Date();
     await user.save({ validateBeforeSave: false });
 
@@ -154,14 +163,26 @@ export const refreshToken = async (req, res, next) => {
     if (!token || typeof token !== "string") throw new ApiError(401, "Refresh token required");
 
     const decoded = verifyRefreshToken(token);
-    const user = await User.findById(decoded._id).select("+refreshToken");
+    const user = await User.findById(decoded._id).select("+refreshToken +activeSessionId");
 
     if (!user || user.refreshToken !== token) {
       clearRefreshCookie(req, res);
       throw new ApiError(401, "Invalid or expired refresh token");
     }
 
-    const { accessToken, refreshToken: newRefreshToken } = generateTokenPair(user._id, user.role);
+    // Single-session enforcement: if admin/employee logged in on another
+    // device after this refresh token was issued, activeSessionId will have
+    // rotated and this refresh attempt must fail with a recognisable code.
+    const isStaff = user.role === "admin" || user.role === "employee";
+    if (isStaff && user.activeSessionId && decoded.sid !== user.activeSessionId) {
+      clearRefreshCookie(req, res);
+      return next(new ApiError(401, "SESSION_REPLACED: signed in from another location"));
+    }
+
+    // Reuse the existing sid — refresh keeps the same session, doesn't fork it.
+    const { accessToken, refreshToken: newRefreshToken } = generateTokenPair(
+      user._id, user.role, decoded.sid || user.activeSessionId
+    );
     user.refreshToken = newRefreshToken;
     await user.save({ validateBeforeSave: false });
 
@@ -178,7 +199,9 @@ export const refreshToken = async (req, res, next) => {
 
 export const logout = async (req, res, next) => {
   try {
-    await User.findByIdAndUpdate(req.user._id, { refreshToken: null });
+    // Wipe the session pointer too — guarantees any leftover access token
+    // (admin/employee) immediately fails the sid check.
+    await User.findByIdAndUpdate(req.user._id, { refreshToken: null, activeSessionId: null });
     clearRefreshCookie(req, res);
     res.json(new ApiResponse(200, null, "Logged out successfully"));
   } catch (err) {
