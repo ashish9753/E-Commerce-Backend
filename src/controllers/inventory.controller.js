@@ -188,14 +188,14 @@ export const getInventoryAnalytics = async (req, res, next) => {
 
       // Top 10 products by units sold
       Product.find({ isDeleted: false })
-        .select("title images price discountPrice sold stock category brand taxRate taxLabel")
+        .select("title images price discountPrice sold stock category brand")
         .populate("category", "name")
         .sort({ sold: -1 })
         .limit(10),
 
       // All products for stock summary
       Product.find({ isDeleted: false })
-        .select("title images price discountPrice sold stock category brand taxRate taxLabel")
+        .select("title images price discountPrice sold stock category brand")
         .populate("category", "name"),
 
       // Category-level aggregation
@@ -239,13 +239,6 @@ export const getInventoryAnalytics = async (req, res, next) => {
     const totalUnits = allProducts.reduce((a, p) => a + p.stock, 0);
     const totalProductsSold = allProducts.reduce((a, p) => a + p.sold, 0);
 
-    // Tax
-    const totalTax = allProducts.reduce((sum, p) => {
-      const rate    = p.taxRate || 0;
-      const effPrice = p.discountPrice || p.price || 0;
-      return sum + (effPrice * p.sold * rate / 100);
-    }, 0);
-
     // Payment method breakdown
     const byPayment = {};
     paymentStats.forEach(p => { byPayment[p._id] = p; });
@@ -260,7 +253,7 @@ export const getInventoryAnalytics = async (req, res, next) => {
     const depositNone    = byDepositStatus.NOT_REQUIRED   || { count: 0, totalAmount: 0 };
 
     res.json(new ApiResponse(200, {
-      orderSummary: { totalOrders, totalSold, totalCancelled, totalReturned, totalRefunded, totalRevenue, totalShipping, totalTax },
+      orderSummary: { totalOrders, totalSold, totalCancelled, totalReturned, totalRefunded, totalRevenue, totalShipping },
       stockHealth:  { outOfStock, lowStock, totalUnits, totalProducts: allProducts.length, totalProductsSold },
       paymentBreakdown: {
         cod:    { count: cod.count,    revenue: cod.revenue,    refunded: cod.refunded,

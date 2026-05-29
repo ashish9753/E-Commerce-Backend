@@ -7,7 +7,6 @@ const employeeSchema = new mongoose.Schema(
     shopName: { type: String, trim: true, default: "" },
     shopDescription: String,
     shopLogo: String,
-    gstNumber: String,
     businessAddress: String,
     bankAccountNumber: String,
     ifscCode: String,

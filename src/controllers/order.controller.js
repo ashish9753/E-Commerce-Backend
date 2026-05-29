@@ -28,9 +28,6 @@ const ORDER_STATUS_MESSAGES = {
 
 const SHIPPING_THRESHOLD = 500;
 const SHIPPING_PRICE = 50;
-// Default tax rate when a product doesn't specify one. Set to 0 so untaxed
-// products stay untaxed at checkout; sellers must explicitly set a rate.
-const TAX_RATE = 0;
 
 const VALID_ORDER_STATUSES = [
   "PLACED", "CONFIRMED", "PACKED", "SHIPPED",
@@ -208,8 +205,6 @@ export const placeOrder = async (req, res, next) => {
     const orderItems = [];
     const itemsForCoupon = [];
     let itemsPrice = 0;
-    let taxPrice = 0;
-    const taxLabelsSet = new Set();
 
     for (const item of rawItems) {
       const productId = item.product._id || item.product;
@@ -221,10 +216,7 @@ export const placeOrder = async (req, res, next) => {
 
       const price = product.discountPrice || product.price;
       const itemTotal = price * item.quantity;
-      const rate = (product.taxRate ?? TAX_RATE * 100) / 100; // convert % to decimal
       itemsPrice += itemTotal;
-      taxPrice   += itemTotal * rate;
-      if (product.taxLabel) taxLabelsSet.add(product.taxLabel);
       orderItems.push({
         product: product._id,
         title: product.title,
@@ -238,10 +230,6 @@ export const placeOrder = async (req, res, next) => {
         quantity: item.quantity,
       });
     }
-
-    taxPrice = parseFloat(taxPrice.toFixed(2));
-    // Derive a readable tax label (e.g. "GST" or "GST / IGST" for mixed)
-    const taxLabel = taxLabelsSet.size > 0 ? [...taxLabelsSet].join(" / ") : "GST";
 
     // Shipping calculation — in priority order:
     //   1. Custom DeliveryArea entry matching the address's city (admin's
@@ -356,7 +344,7 @@ export const placeOrder = async (req, res, next) => {
       }
     }
 
-    const totalPrice = parseFloat((itemsPrice + shippingPrice + taxPrice - discountAmount).toFixed(2));
+    const totalPrice = parseFloat((itemsPrice + shippingPrice - discountAmount).toFixed(2));
 
     // Order limits + COD eligibility + booking
     let codBookingAmount = 0;
@@ -397,8 +385,6 @@ export const placeOrder = async (req, res, next) => {
       paymentMethod,
       itemsPrice,
       shippingPrice,
-      taxPrice,
-      taxLabel,
       discountAmount,
       totalPrice,
       couponId: couponId?.toString() || null,

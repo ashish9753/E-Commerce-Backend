@@ -13,7 +13,7 @@ const MONTH_NAMES = ["","January","February","March","April","May","June","July"
 
 export const registerEmployee = async (req, res, next) => {
   try {
-    const { shopName, gstNumber, businessAddress, bankAccountNumber, ifscCode, shopDescription } = req.body;
+    const { shopName, businessAddress, bankAccountNumber, ifscCode, shopDescription } = req.body;
     if (!shopName) throw new ApiError(400, "Shop name is required");
 
     const existing = await Employee.findOne({ user: req.user._id });
@@ -22,7 +22,6 @@ export const registerEmployee = async (req, res, next) => {
     const employee = await Employee.create({
       user: req.user._id,
       shopName,
-      gstNumber,
       businessAddress,
       bankAccountNumber,
       ifscCode,
@@ -55,7 +54,7 @@ export const registerEmployee = async (req, res, next) => {
 
 export const adminCreateEmployee = async (req, res, next) => {
   try {
-    const { name, email, phone, password, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription, permissions } = req.body;
+    const { name, email, phone, password, designation, department, joiningDate, monthlySalary, businessAddress, shopDescription, permissions } = req.body;
     if (!name || !email || !phone || !password)
       throw new ApiError(400, "Name, email, phone and password are required");
     const phoneDigits = assertPhone(phone);
@@ -70,7 +69,6 @@ export const adminCreateEmployee = async (req, res, next) => {
     const employee = await Employee.create({
       user: user._id,
       shopName: name,
-      gstNumber,
       businessAddress,
       shopDescription,
       designation,
@@ -97,7 +95,7 @@ export const adminCreateEmployee = async (req, res, next) => {
 
 export const adminRegisterExistingUser = async (req, res, next) => {
   try {
-    const { userId, shopName, gstNumber, businessAddress, shopDescription } = req.body;
+    const { userId, shopName, businessAddress, shopDescription } = req.body;
     if (!userId || !shopName)
       throw new ApiError(400, "userId and shopName are required");
 
@@ -120,7 +118,6 @@ export const adminRegisterExistingUser = async (req, res, next) => {
       existing.isBlocked       = false;
       existing.isVerified      = true;
       existing.shopName        = shopName        ?? existing.shopName;
-      existing.gstNumber       = gstNumber       ?? existing.gstNumber;
       existing.businessAddress = businessAddress ?? existing.businessAddress;
       existing.shopDescription = shopDescription ?? existing.shopDescription;
       await existing.save();
@@ -129,7 +126,6 @@ export const adminRegisterExistingUser = async (req, res, next) => {
       employee = await Employee.create({
         user: userId,
         shopName,
-        gstNumber,
         businessAddress,
         shopDescription,
         isVerified: true,
@@ -162,10 +158,10 @@ export const getMyEmployeeProfile = async (req, res, next) => {
 
 export const updateEmployeeProfile = async (req, res, next) => {
   try {
-    const { shopName, shopDescription, businessAddress, bankAccountNumber, ifscCode, gstNumber } = req.body;
+    const { shopName, shopDescription, businessAddress, bankAccountNumber, ifscCode } = req.body;
     const employee = await Employee.findOneAndUpdate(
       { user: req.user._id },
-      { shopName, shopDescription, businessAddress, bankAccountNumber, ifscCode, gstNumber },
+      { shopName, shopDescription, businessAddress, bankAccountNumber, ifscCode },
       { new: true, runValidators: true }
     );
     if (!employee) throw new ApiError(404, "Employee profile not found");
@@ -253,7 +249,7 @@ export const getEmployeeById = async (req, res, next) => {
 // ── Admin: update employee details + account ────────────────────────
 export const updateEmployee = async (req, res, next) => {
   try {
-    const { name, email, phone, newPassword, designation, department, joiningDate, monthlySalary, businessAddress, gstNumber, shopDescription, permissions } = req.body;
+    const { name, email, phone, newPassword, designation, department, joiningDate, monthlySalary, businessAddress, shopDescription, permissions } = req.body;
 
     const employee = await Employee.findById(req.params.employeeId);
     if (!employee) throw new ApiError(404, "Employee not found");
@@ -276,7 +272,6 @@ export const updateEmployee = async (req, res, next) => {
     if (designation    !== undefined) update.designation    = designation;
     if (department     !== undefined) update.department     = department;
     if (businessAddress!== undefined) update.businessAddress= businessAddress;
-    if (gstNumber      !== undefined) update.gstNumber      = gstNumber;
     if (shopDescription!== undefined) update.shopDescription= shopDescription;
     if (monthlySalary  !== undefined) update.monthlySalary  = monthlySalary ? Number(monthlySalary) : 0;
     if (joiningDate)                  update.joiningDate    = joiningDate;

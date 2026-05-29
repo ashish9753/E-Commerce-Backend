@@ -59,8 +59,6 @@ const orderSchema = new mongoose.Schema(
     refundReason: String,
     itemsPrice: Number,
     shippingPrice: { type: Number, default: 0 },
-    taxPrice: { type: Number, default: 0 },
-    taxLabel: { type: String, default: "GST" },
     discountAmount: { type: Number, default: 0 },
     totalPrice: Number,
     coupon: { type: mongoose.Schema.Types.ObjectId, ref: "Coupon", default: null },
