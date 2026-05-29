@@ -80,9 +80,16 @@ export const createProduct = async (req, res, next) => {
 export const getProducts = async (req, res, next) => {
   try {
     const { page, limit, skip } = getPaginationData(req.query);
-    const { search, category, brand, minPrice, maxPrice, sort, isFeatured } = req.query;
+    const { search, category, brand, minPrice, maxPrice, sort, isFeatured, onSale } = req.query;
 
     const filter = { isDeleted: false, isPublished: true };
+    // ?onSale=true → only products with a real discount (discountPrice
+    // present and strictly less than the regular price). Used by the
+    // storefront's "Flash Sale" / "Events & Offers" nav links.
+    if (onSale === "true") {
+      filter.discountPrice = { $gt: 0 };
+      filter.$expr = { $lt: ["$discountPrice", "$price"] };
+    }
     if (category) {
       // Accept either an ObjectId or a category name/slug. If a name is
       // supplied, look it up case-insensitively. If no Category matches,

@@ -23,6 +23,11 @@ const employeeSchema = new mongoose.Schema(
     // Per-employee permission keys controlling sidebar tabs and write actions.
     // Default = full access so existing employees keep working.
     permissions:    { type: [String], default: () => DEFAULT_PERMISSIONS },
+    // Soft-delete: when admin "removes" an employee we archive the doc so
+    // products, orders, return requests and salary history that reference it
+    // stay intact. The linked User.role flips back to "user", revoking access.
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: Date,
   },
   { timestamps: true }
 );

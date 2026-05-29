@@ -105,18 +105,36 @@ export const adminRegisterExistingUser = async (req, res, next) => {
     if (!user) throw new ApiError(404, "User not found");
 
     const existing = await Employee.findOne({ user: userId });
-    if (existing) throw new ApiError(409, "This user already has an employee profile");
+    if (existing && !existing.isDeleted) {
+      throw new ApiError(409, "This user already has an employee profile");
+    }
 
     await User.findByIdAndUpdate(userId, { role: "employee" });
 
-    const employee = await Employee.create({
-      user: userId,
-      shopName,
-      gstNumber,
-      businessAddress,
-      shopDescription,
-      isVerified: true,
-    });
+    let employee;
+    if (existing && existing.isDeleted) {
+      // Reactivate the archived employee record so all their historical
+      // products, orders and salary records remain linked.
+      existing.isDeleted       = false;
+      existing.deletedAt       = undefined;
+      existing.isBlocked       = false;
+      existing.isVerified      = true;
+      existing.shopName        = shopName        ?? existing.shopName;
+      existing.gstNumber       = gstNumber       ?? existing.gstNumber;
+      existing.businessAddress = businessAddress ?? existing.businessAddress;
+      existing.shopDescription = shopDescription ?? existing.shopDescription;
+      await existing.save();
+      employee = existing;
+    } else {
+      employee = await Employee.create({
+        user: userId,
+        shopName,
+        gstNumber,
+        businessAddress,
+        shopDescription,
+        isVerified: true,
+      });
+    }
 
     await notify({
       userId,
@@ -178,6 +196,14 @@ export const getAllEmployees = async (req, res, next) => {
     const { page, limit, skip } = getPaginationData(req.query);
     const filter = {};
     if (req.query.isVerified !== undefined) filter.isVerified = req.query.isVerified === "true";
+    // Archived (soft-deleted) employees are hidden by default. Admin can
+    // pass ?includeDeleted=true to inspect them; ?onlyDeleted=true to view
+    // only the archive.
+    if (req.query.onlyDeleted === "true") {
+      filter.isDeleted = true;
+    } else if (req.query.includeDeleted !== "true") {
+      filter.isDeleted = { $ne: true };
+    }
 
     const [employees, total] = await Promise.all([
       Employee.find(filter).populate("user", "name email phone").skip(skip).limit(limit).sort({ createdAt: -1 }),
@@ -281,14 +307,25 @@ export const blockEmployee = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── Admin: delete employee ───────────────────────────────────────────
+// ── Admin: remove employee (soft-delete) ─────────────────────────────
+// Archives the employee instead of hard-deleting so all referenced data
+// (products, orders, return requests, salary history) stays intact and
+// remains visible to admin reports. The linked User.role reverts to
+// "user", so the employee loses access to the employee panel immediately.
 export const deleteEmployee = async (req, res, next) => {
   try {
-    const employee = await Employee.findByIdAndDelete(req.params.employeeId);
+    const employee = await Employee.findById(req.params.employeeId);
     if (!employee) throw new ApiError(404, "Employee not found");
+    if (employee.isDeleted) throw new ApiError(400, "Employee is already archived");
+
+    employee.isDeleted = true;
+    employee.deletedAt = new Date();
+    employee.isBlocked = true;
+    await employee.save();
+
     await User.findByIdAndUpdate(employee.user, { role: "user" });
-    await SalaryRecord.deleteMany({ employee: req.params.employeeId });
-    res.json(new ApiResponse(200, null, "Employee removed"));
+
+    res.json(new ApiResponse(200, null, "Employee archived — their products, orders and salary history are preserved"));
   } catch (err) { next(err); }
 };
 
