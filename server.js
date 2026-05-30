@@ -6,7 +6,7 @@ import { Server } from "socket.io";
 import app, { ALLOWED_ORIGINS } from "./src/app.js";
 import connectDB from "./src/config/db.js";
 import { initChatSocket } from "./src/sockets/chat.socket.js";
-import { startOrderTimeoutJob, ORDER_TIMEOUT_MIN } from "./src/jobs/orderTimeout.job.js";
+import { startOrderTimeoutJob } from "./src/jobs/orderTimeout.job.js";
 
 const PORT = process.env.PORT || 5000;
 
@@ -38,11 +38,6 @@ connectDB().then(() => {
     startOrderTimeoutJob();
   });
 });
-
-// Expose the timeout value to the frontend so the countdown matches the backend's cutoff exactly.
-app.get("/api/v1/config/order-timeout", (req, res) =>
-  res.json({ success: true, data: { timeoutMinutes: ORDER_TIMEOUT_MIN } })
-);
 
 process.on("unhandledRejection", (err) => {
   console.error("Unhandled Rejection:", err.message);

@@ -1,112 +1,262 @@
-# Deployment — Docker + nginx + GitHub Actions (HTTPS)
+# Hostinger KVM2 Deployment
 
-Architecture:
+This backend is ready for a Docker-based Linux VPS deployment:
 
+- Node app runs inside Docker on port `5000`
+- Redis runs as a private Docker service
+- nginx handles public HTTPS on ports `80` and `443`
+- GitHub Actions builds the image, pushes it to Docker Hub, then restarts the VPS container
+- MongoDB should be MongoDB Atlas or another external MongoDB connection string
+
+Replace these placeholders before running commands:
+
+- `<VPS_IP>`: your Hostinger VPS public IP
+- `<API_DOMAIN>`: your API domain, for example `api.example.com`
+- `<DOCKERHUB_USERNAME>`: your Docker Hub username
+- `<FRONTEND_URL>`: your live frontend URL, for example `https://your-frontend.onrender.com`
+
+If you do not have a domain yet, you can use nip.io with your VPS IP:
+
+```bash
+<VPS_IP_WITH_DASHES>.nip.io
 ```
-GitHub push (main)
-   └─ GitHub Actions (.github/workflows/deploy.yml)
-        ├─ build image  → Docker Hub: ashish8927/ecommerce-backend:latest
-        └─ SSH to VPS   → docker compose pull + up -d
 
-VPS (Hostinger, Ubuntu 24.04, 82.29.164.26)
-   nginx (:443 TLS, Let's Encrypt for 82-29-164-26.nip.io)
-     └─ proxy → api container (127.0.0.1:5000)  ──> MongoDB Atlas
-                redis container (internal only)
+Example: `82.29.164.26` becomes `82-29-164-26.nip.io`.
 
-Render static site (HTTPS frontend)  ──HTTPS──>  https://82-29-164-26.nip.io/api/v1
+## 1. Local Files To Check
+
+Required files are already present:
+
+- `Dockerfile`
+- `docker-compose.prod.yml`
+- `deploy/nginx.conf`
+- `deploy/env.prod.example`
+- `.github/workflows/deploy.yml`
+- `.dockerignore`
+
+Before deploy, edit these values:
+
+- `docker-compose.prod.yml`: set `image:` to `<DOCKERHUB_USERNAME>/ecommerce-backend:latest`
+- `.github/workflows/deploy.yml`: set the Docker tag to the same image
+- `deploy/nginx.conf`: replace `82-29-164-26.nip.io` with `<API_DOMAIN>`
+
+Commit and push after editing:
+
+```bash
+git add Dockerfile docker-compose.prod.yml deploy/nginx.conf deploy/env.prod.example .github/workflows/deploy.yml DEPLOY.md server.js
+git commit -m "Prepare production deployment"
+git push origin main
 ```
 
----
+## 2. Create GitHub Secrets
 
-## A. GitHub repo secrets (Settings → Secrets and variables → Actions)
+Open your GitHub repo:
 
-| Secret | Value |
-|---|---|
-| `DOCKERHUB_USERNAME` | `ashish8927` |
-| `DOCKERHUB_TOKEN`    | Docker Hub access token (Read & Write) |
-| `DEPLOY_HOST`        | `82.29.164.26` |
-| `DEPLOY_USER`        | `root` |
-| `DEPLOY_SSH_KEY`     | private SSH key whose public key is in the VPS `~/.ssh/authorized_keys` |
+```text
+Settings -> Secrets and variables -> Actions -> New repository secret
+```
 
-Generate a deploy key (on your machine), then add the public half to the VPS:
+Add:
+
+```text
+DOCKERHUB_USERNAME=<DOCKERHUB_USERNAME>
+DOCKERHUB_TOKEN=<Docker Hub access token with read/write access>
+DEPLOY_HOST=<VPS_IP>
+DEPLOY_USER=root
+DEPLOY_SSH_KEY=<private SSH key for the VPS>
+```
+
+Create a deploy SSH key on your local machine:
+
 ```bash
 ssh-keygen -t ed25519 -f deploy_key -N ""
-# paste deploy_key.pub into the VPS ~/.ssh/authorized_keys
-# paste the private deploy_key contents into the DEPLOY_SSH_KEY secret
 ```
 
----
+Copy the public key to the VPS:
 
-## B. One-time VPS bootstrap (wipe + clean setup)
-
-SSH in: `ssh root@82.29.164.26`
-
-### 1. Tear down anything old
 ```bash
-cd /opt/ecommerce-backend 2>/dev/null && docker compose -f docker-compose.prod.yml down -v 2>/dev/null
-docker system prune -af            # remove old images/containers
-sudo rm -rf /opt/ecommerce /opt/ecommerce-backend   # remove stale dirs
+ssh-copy-id -i deploy_key.pub root@<VPS_IP>
 ```
 
-### 2. Install Docker + nginx + certbot (skip what's already present)
+Put the private key content into GitHub secret `DEPLOY_SSH_KEY`:
+
 ```bash
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin nginx certbot python3-certbot-nginx
-sudo systemctl enable --now docker            # ensures Docker starts on boot
+cat deploy_key
 ```
 
-### 3. Project dir + compose + env
+## 3. Bootstrap The VPS
+
+SSH into Hostinger:
+
 ```bash
-sudo mkdir -p /opt/ecommerce-backend && cd /opt/ecommerce-backend
-# copy docker-compose.prod.yml from the repo to here (scp, or paste it)
-# create .env from deploy/env.prod.example and fill in REAL values:
-nano .env        # set MONGO_URI, token secrets, Cloudinary, SMTP, CLIENT_URL, etc.
+ssh root@<VPS_IP>
 ```
-> `CLIENT_URL` MUST be `https://e-commerce-frontend-9vtd.onrender.com` (not localhost).
 
-### 4. nginx + TLS
+Update Linux and install Docker, nginx, and certbot:
+
 ```bash
-# copy deploy/nginx.conf to /etc/nginx/sites-available/default
-sudo cp deploy/nginx.conf /etc/nginx/sites-available/default
-sudo certbot --nginx -d 82-29-164-26.nip.io     # issues + wires the cert
-sudo ufw allow 80,443/tcp 2>/dev/null || true
-sudo nginx -t && sudo systemctl reload nginx
+apt update
+apt upgrade -y
+apt install -y docker.io docker-compose-plugin nginx certbot python3-certbot-nginx ufw
+systemctl enable --now docker
+systemctl enable --now nginx
 ```
 
-### 5. Log in to Docker Hub + start
+Create the app directory:
+
 ```bash
-docker login -u ashish8927          # paste access token
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
+mkdir -p /opt/ecommerce-backend
+cd /opt/ecommerce-backend
 ```
 
-### 6. Verify
+Copy production files from your computer to the VPS:
+
 ```bash
-docker compose -f docker-compose.prod.yml ps          # both Up/healthy
-curl https://82-29-164-26.nip.io/health               # {"status":"OK"} — no -k, trusted cert
+scp docker-compose.prod.yml root@<VPS_IP>:/opt/ecommerce-backend/docker-compose.prod.yml
+scp deploy/env.prod.example root@<VPS_IP>:/opt/ecommerce-backend/.env
+scp deploy/nginx.conf root@<VPS_IP>:/etc/nginx/sites-available/default
 ```
 
----
+Back on the VPS, edit the env file:
 
-## C. Day-to-day deploys
+```bash
+nano /opt/ecommerce-backend/.env
+```
 
-Just push to `main`. GitHub Actions builds, pushes, and redeploys automatically.
-Manual redeploy on the VPS if ever needed:
+Required production values:
+
+```text
+PORT=5000
+NODE_ENV=production
+MONGO_URI=<MongoDB Atlas connection string>
+ACCESS_TOKEN_SECRET=<long random secret>
+REFRESH_TOKEN_SECRET=<long random secret>
+CLOUDINARY_CLOUD_NAME=<cloudinary cloud name>
+CLOUDINARY_API_KEY=<cloudinary api key>
+CLOUDINARY_API_SECRET=<cloudinary api secret>
+SMTP_USER=<email user>
+SMTP_PASS=<email app password>
+RAZORPAY_KEY_ID=<razorpay key id>
+RAZORPAY_KEY_SECRET=<razorpay key secret>
+GOOGLE_CLIENT_ID=<google client id, if Google login is enabled>
+CLIENT_URL=<FRONTEND_URL>
+```
+
+Generate strong secrets:
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 32
+```
+
+## 4. Configure nginx And HTTPS
+
+Edit nginx if needed:
+
+```bash
+nano /etc/nginx/sites-available/default
+```
+
+Make sure `server_name` is your API domain:
+
+```nginx
+server_name <API_DOMAIN>;
+```
+
+Test nginx:
+
+```bash
+nginx -t
+systemctl reload nginx
+```
+
+Allow web traffic:
+
+```bash
+ufw allow OpenSSH
+ufw allow 80/tcp
+ufw allow 443/tcp
+ufw --force enable
+```
+
+Create the SSL certificate:
+
+```bash
+certbot --nginx -d <API_DOMAIN>
+```
+
+## 5. Start The App
+
+Log in to Docker Hub on the VPS:
+
+```bash
+docker login -u <DOCKERHUB_USERNAME>
+```
+
+Start the stack:
+
 ```bash
 cd /opt/ecommerce-backend
 docker compose -f docker-compose.prod.yml pull
 docker compose -f docker-compose.prod.yml up -d
 ```
 
----
+Check containers:
 
-## D. Survives reboots
-
-- `restart: unless-stopped` on both services + `systemctl enable docker` means the
-  stack auto-starts after any VPS reboot (the cause of the earlier downtime).
-- The cert auto-renews (certbot installs a systemd timer).
-
-## E. Cert renewal sanity check
 ```bash
-sudo certbot renew --dry-run
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs -f api
+```
+
+Test the API:
+
+```bash
+curl http://127.0.0.1:5000/health
+curl https://<API_DOMAIN>/health
+```
+
+Expected result:
+
+```json
+{"status":"OK"}
+```
+
+## 6. Automatic Deploys
+
+After the first VPS setup, deploys are automatic:
+
+```bash
+git add .
+git commit -m "Update backend"
+git push origin main
+```
+
+GitHub Actions will:
+
+1. install dependencies
+2. run syntax checks
+3. build the Docker image
+4. push the image to Docker Hub
+5. SSH into the VPS
+6. run `docker compose pull && docker compose up -d`
+
+Manual redeploy command:
+
+```bash
+ssh root@<VPS_IP>
+cd /opt/ecommerce-backend
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+## 7. Useful Debug Commands
+
+```bash
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=100 api
+docker compose -f docker-compose.prod.yml logs --tail=100 redis
+docker restart ecommerce-backend-api-1
+nginx -t
+systemctl status nginx
+certbot renew --dry-run
 ```
