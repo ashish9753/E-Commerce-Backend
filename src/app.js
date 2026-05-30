@@ -30,7 +30,10 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:3000",
   "https://e-commerce-frontend-9vtd.onrender.com",
 ];
-const ALLOWED_ORIGINS = (process.env.CLIENT_URL || "")
+// Exported so Socket.io (server.js) shares the exact same allowlist — otherwise
+// websocket connections from the Render frontend get blocked even though REST
+// calls succeed.
+export const ALLOWED_ORIGINS = (process.env.CLIENT_URL || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean)

@@ -3,7 +3,7 @@ dotenv.config();
 
 import { createServer } from "http";
 import { Server } from "socket.io";
-import app from "./src/app.js";
+import app, { ALLOWED_ORIGINS } from "./src/app.js";
 import connectDB from "./src/config/db.js";
 import { initChatSocket } from "./src/sockets/chat.socket.js";
 import { startOrderTimeoutJob, ORDER_TIMEOUT_MIN } from "./src/jobs/orderTimeout.job.js";
@@ -14,7 +14,12 @@ const httpServer = createServer(app);
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    // Same allowlist as the REST API so the Render frontend's websocket
+    // (chat / live notifications) is accepted, not just localhost.
+    origin: (origin, cb) => {
+      if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error(`Socket.io CORS: origin ${origin} not allowed`));
+    },
     methods: ["GET", "POST"],
     credentials: true,
   },
